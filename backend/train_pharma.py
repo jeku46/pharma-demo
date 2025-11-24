@@ -14,8 +14,8 @@ print("=" * 60)
 # Configuration
 API_KEY = "g3kyzU8K82YQwalVS2Ks"
 WORKSPACE = "die-counter"
-PROJECT_NAME = "pharma-demo-53exj"
-VERSION = 9
+PROJECT_NAME = "pharma-demo-v2-5mkw0"
+VERSION = 2
 MODEL = "yolo11s.pt"  # YOLOv11 small - better accuracy than nano
 
 print(f"\nConfiguration:")

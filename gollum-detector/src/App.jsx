@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { io } from 'socket.io-client'
 import SpatialEditor from './SpatialEditor'
+import Insights from './Insights'
 import './App.css'
 
 const BACKEND_URL = 'http://localhost:5001'
@@ -21,7 +22,7 @@ function App() {
   const [cameraActive, setCameraActive] = useState(false)
   const [liveDetection, setLiveDetection] = useState(null)
   const [lastGollumSpotted, setLastGollumSpotted] = useState(null)
-  const [confidence, setConfidence] = useState(0.1)
+  const [confidence, setConfidence] = useState(0.7)
   const [zones, setZones] = useState([])
   const [occupiedZoneIds, setOccupiedZoneIds] = useState([])
   const socketRef = useRef(null)
@@ -296,11 +297,12 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Gollum Detector</h1>
+        <h1>GMP Wash Cycle Compliance</h1>
         <p className="subtitle">
-          {mode === 'upload' ? 'Upload an image to detect if Gollum is present' :
-           mode === 'live' ? 'Live webcam detection' :
-           'Define spatial zones for detection areas'}
+          {mode === 'upload' ? 'Upload an image to detect IBC presence' :
+           mode === 'live' ? 'Live IBC monitoring and zone tracking' :
+           mode === 'zones' ? 'Define spatial zones for detection areas' :
+           'Analytics and compliance monitoring'}
         </p>
 
         <div className="mode-switcher">
@@ -321,6 +323,12 @@ function App() {
             onClick={() => switchMode('zones')}
           >
             Zone Editor
+          </button>
+          <button
+            className={`mode-button ${mode === 'insights' ? 'active' : ''}`}
+            onClick={() => switchMode('insights')}
+          >
+            Insights
           </button>
         </div>
       </header>
@@ -390,22 +398,6 @@ function App() {
             {error && (
               <div className="error-message">
                 {error}
-              </div>
-            )}
-
-            {detectionResult && (
-              <div className="results-container">
-                <h2 className="results-title">Detection Results</h2>
-                {(() => {
-                  const predictions = detectionResult?.outputs?.[0]?.predictions?.predictions
-                  const gollumFound = predictions?.some(pred => pred.class === 'gollum')
-
-                  return gollumFound ? (
-                    <div className="gollum-found">GOLLUM FOUND</div>
-                  ) : (
-                    <div className="gollum-not-found">gollum not found</div>
-                  )
-                })()}
               </div>
             )}
           </div>
@@ -488,24 +480,8 @@ function App() {
                 {error}
               </div>
             )}
-
-            {liveDetection && cameraActive && (
-              <div className="results-container">
-                <h2 className="results-title">Live Detection</h2>
-                {liveDetection.gollum_found ? (
-                  <div className="gollum-found">GOLLUM FOUND</div>
-                ) : (
-                  <div className="gollum-not-found">gollum not found</div>
-                )}
-                {lastGollumSpotted && (
-                  <div className="last-spotted">
-                    Last spotted: {lastGollumSpotted.toLocaleTimeString()}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
-        ) : (
+        ) : mode === 'zones' ? (
           // Zone Editor Mode
           <div className="zones-container">
             <SpatialEditor
@@ -525,6 +501,9 @@ function App() {
               )}
             </div>
           </div>
+        ) : (
+          // Insights Mode
+          <Insights />
         )}
       </main>
     </div>
