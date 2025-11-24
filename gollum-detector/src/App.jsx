@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { io } from 'socket.io-client'
+import SpatialEditor from './SpatialEditor'
 import './App.css'
 
 const BACKEND_URL = 'http://localhost:5001'
@@ -19,7 +20,12 @@ function App() {
   // Live detection state
   const [cameraActive, setCameraActive] = useState(false)
   const [liveDetection, setLiveDetection] = useState(null)
+  const [lastGollumSpotted, setLastGollumSpotted] = useState(null)
+  const [confidence, setConfidence] = useState(0.1)
+  const [zones, setZones] = useState([])
+  const [occupiedZoneIds, setOccupiedZoneIds] = useState([])
   const socketRef = useRef(null)
+  const liveCanvasRef = useRef(null)
 
   const handleImageSelect = async (file) => {
     if (file && file.type.startsWith('image/')) {
@@ -139,6 +145,67 @@ function App() {
     setError(null)
   }
 
+  // Fetch zones when in live mode
+  useEffect(() => {
+    if (mode === 'live') {
+      fetchZones()
+    }
+  }, [mode])
+
+  const fetchZones = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/zones`)
+      const data = await response.json()
+      console.log('Fetched zones:', data.zones)
+      setZones(data.zones || [])
+    } catch (err) {
+      console.error('Failed to fetch zones:', err)
+    }
+  }
+
+  // Draw zones on canvas
+  useEffect(() => {
+    if (mode === 'live' && liveCanvasRef.current && cameraActive && zones.length > 0) {
+      const canvas = liveCanvasRef.current
+      const ctx = canvas.getContext('2d')
+
+      console.log('Drawing zones on canvas:', zones.length)
+
+      const drawZones = () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+        zones.forEach(zone => {
+          const isOccupied = occupiedZoneIds.includes(zone._id)
+
+          // Fill - green if occupied, blue if empty
+          ctx.fillStyle = isOccupied ? 'rgba(76, 175, 80, 0.3)' : 'rgba(66, 133, 244, 0.2)'
+          ctx.fillRect(zone.x, zone.y, zone.width, zone.height)
+
+          // Border - brighter green if occupied, blue if empty
+          ctx.strokeStyle = isOccupied ? '#4caf50' : '#4285f4'
+          ctx.lineWidth = isOccupied ? 3 : 2
+          ctx.strokeRect(zone.x, zone.y, zone.width, zone.height)
+
+          // Label
+          ctx.fillStyle = '#fff'
+          ctx.font = 'bold 14px Arial'
+          const textWidth = ctx.measureText(zone.name).width
+          ctx.fillStyle = isOccupied ? 'rgba(76, 175, 80, 0.9)' : 'rgba(0, 0, 0, 0.7)'
+          ctx.fillRect(zone.x, zone.y - 22, textWidth + 10, 22)
+          ctx.fillStyle = '#fff'
+          ctx.fillText(zone.name, zone.x + 5, zone.y - 6)
+        })
+      }
+
+      // Draw immediately
+      drawZones()
+
+      // Redraw zones every 100ms to keep them visible
+      const interval = setInterval(drawZones, 100)
+      return () => clearInterval(interval)
+    }
+  }, [mode, cameraActive, zones, occupiedZoneIds])
+
   // WebSocket connection for live detection
   useEffect(() => {
     if (mode === 'live') {
@@ -151,12 +218,21 @@ function App() {
       socketRef.current.on('detection', (data) => {
         console.log('Detection event:', data)
         setLiveDetection(data)
+        if (data.gollum_found) {
+          setLastGollumSpotted(new Date(data.timestamp * 1000))
+        }
+      })
+
+      socketRef.current.on('zone_occupancy', (data) => {
+        console.log('Zone occupancy:', data.occupied_zone_ids)
+        setOccupiedZoneIds(data.occupied_zone_ids || [])
       })
 
       return () => {
         if (socketRef.current) {
           socketRef.current.disconnect()
         }
+        setOccupiedZoneIds([])
       }
     }
   }, [mode])
@@ -193,6 +269,19 @@ function App() {
     }
   }
 
+  const updateConfidence = async (newConfidence) => {
+    setConfidence(newConfidence)
+    try {
+      await fetch(`${BACKEND_URL}/set_confidence`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confidence: newConfidence })
+      })
+    } catch (err) {
+      console.error('Failed to update confidence:', err)
+    }
+  }
+
   const switchMode = (newMode) => {
     // Stop camera when switching modes
     if (mode === 'live' && cameraActive) {
@@ -209,7 +298,9 @@ function App() {
       <header className="app-header">
         <h1>Gollum Detector</h1>
         <p className="subtitle">
-          {mode === 'upload' ? 'Upload an image to detect if Gollum is present' : 'Live webcam detection'}
+          {mode === 'upload' ? 'Upload an image to detect if Gollum is present' :
+           mode === 'live' ? 'Live webcam detection' :
+           'Define spatial zones for detection areas'}
         </p>
 
         <div className="mode-switcher">
@@ -224,6 +315,12 @@ function App() {
             onClick={() => switchMode('live')}
           >
             Live Detection
+          </button>
+          <button
+            className={`mode-button ${mode === 'zones' ? 'active' : ''}`}
+            onClick={() => switchMode('zones')}
+          >
+            Zone Editor
           </button>
         </div>
       </header>
@@ -313,16 +410,33 @@ function App() {
             )}
           </div>
         )
-        ) : (
+        ) : mode === 'live' ? (
           // Live Detection Mode
           <div className="live-container">
-            <div className="video-wrapper">
+            <div className="video-wrapper" style={{ position: 'relative' }}>
               {cameraActive ? (
-                <img
-                  src={`${BACKEND_URL}/video_feed`}
-                  alt="Live video feed"
-                  className="live-video"
-                />
+                <>
+                  <img
+                    src={`${BACKEND_URL}/video_feed`}
+                    alt="Live video feed"
+                    className="live-video"
+                  />
+                  <canvas
+                    ref={liveCanvasRef}
+                    className="zone-overlay"
+                    width={640}
+                    height={480}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      height: '100%',
+                      pointerEvents: 'none',
+                      zIndex: 10
+                    }}
+                  />
+                </>
               ) : (
                 <div className="video-placeholder">
                   <svg
@@ -355,6 +469,20 @@ function App() {
               )}
             </div>
 
+            <div className="confidence-slider">
+              <label htmlFor="confidence">
+                Confidence: {(confidence * 100).toFixed(0)}%
+              </label>
+              <input
+                type="range"
+                id="confidence"
+                min="0"
+                max="100"
+                value={confidence * 100}
+                onChange={(e) => updateConfidence(e.target.value / 100)}
+              />
+            </div>
+
             {error && (
               <div className="error-message">
                 {error}
@@ -369,8 +497,33 @@ function App() {
                 ) : (
                   <div className="gollum-not-found">gollum not found</div>
                 )}
+                {lastGollumSpotted && (
+                  <div className="last-spotted">
+                    Last spotted: {lastGollumSpotted.toLocaleTimeString()}
+                  </div>
+                )}
               </div>
             )}
+          </div>
+        ) : (
+          // Zone Editor Mode
+          <div className="zones-container">
+            <SpatialEditor
+              videoSrc={`${BACKEND_URL}/video_feed`}
+              isActive={cameraActive}
+            />
+
+            <div className="action-buttons">
+              {!cameraActive ? (
+                <button className="detect-button" onClick={startCamera}>
+                  Start Camera
+                </button>
+              ) : (
+                <button className="reset-button" onClick={stopCamera}>
+                  Stop Camera
+                </button>
+              )}
+            </div>
           </div>
         )}
       </main>
