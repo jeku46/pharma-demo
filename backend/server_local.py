@@ -38,7 +38,7 @@ USE_ROBOFLOW_API = True  # Set to True to use Roboflow hosted inference
 ROBOFLOW_API_KEY = "g3kyzU8K82YQwalVS2Ks"
 ROBOFLOW_WORKSPACE = "die-counter"
 ROBOFLOW_PROJECT = "pharma-demo-v2-5mkw0"
-ROBOFLOW_VERSION = 6
+ROBOFLOW_VERSION = 7
 ROBOFLOW_API_URL = f"https://detect.roboflow.com/{ROBOFLOW_PROJECT}/{ROBOFLOW_VERSION}"
 
 # LED control configuration
@@ -69,6 +69,7 @@ except Exception as e:
 # Tracking state for IBC occupancy
 ibc_zone_state = {}  # {ibc_id: {zone_id: enter_time, ...}}
 active_occupancies = {}  # {(ibc_id, zone_id): mongo_doc_id}
+ibc_fill_status = {}  # {ibc_id: class_name} - Track fill status of each IBC
 
 def load_zones_from_file():
     """Load zones from JSON file"""
@@ -150,6 +151,24 @@ def record_zone_entry(ibc_id, zone, enter_time):
                     compliance_events_collection.insert_one(event)
                     print(f"⚠️ COMPLIANCE VIOLATION: {reason} - entered {zone['name']}")
 
+        # Check for non-empty IBC entering Washroom
+        if zone['name'].lower() == 'washroom' and compliance_events_collection is not None:
+            fill_status = ibc_fill_status.get(ibc_id, '')
+            if fill_status and not fill_status.lower().endswith('empty'):
+                # Non-empty IBC entered washroom
+                event = {
+                    'timestamp': enter_time,
+                    'ibc_id': int(ibc_id),
+                    'zone_id': zone['_id'],
+                    'zone_name': zone['name'],
+                    'event_type': 'non_empty_washroom_entry',
+                    'severity': 'high',
+                    'reason': f"Non-empty IBC ({fill_status}) entered Washroom",
+                    'fill_status': fill_status
+                }
+                compliance_events_collection.insert_one(event)
+                print(f"⚠️ COMPLIANCE VIOLATION: Non-empty IBC ({fill_status}) entered Washroom")
+
 def update_ibc_tracking(ibc_id, current_time):
     """Update IBC first_seen and last_seen timestamps"""
     if not use_mongodb or ibcs_collection is None:
@@ -191,9 +210,9 @@ def record_zone_exit(ibc_id, zone_id, exit_time):
 
         del active_occupancies[key]
 
-def process_ibc_tracking(boxes, zones, current_time):
+def process_ibc_tracking(boxes, zones, current_time, model=None):
     """Process IBC positions and track zone occupancy"""
-    global ibc_zone_state
+    global ibc_zone_state, ibc_fill_status
 
     # Get current IBC positions
     current_ibc_zones = {}  # {ibc_id: set of zone_ids}
@@ -204,6 +223,12 @@ def process_ibc_tracking(boxes, zones, current_time):
 
         ibc_id = int(box.id[0])
         center = get_box_center(box)
+
+        # Capture fill status (class name) for this IBC
+        if model is not None and hasattr(box, 'cls'):
+            class_id = int(box.cls[0])
+            class_name = model.names[class_id]
+            ibc_fill_status[ibc_id] = class_name
 
         # Update IBC tracking (first_seen, last_seen)
         update_ibc_tracking(ibc_id, current_time)
@@ -470,7 +495,7 @@ def draw_detections(frame, detections, tracked_objects):
 
 def detection_loop():
     """Main detection loop running in a separate thread"""
-    global latest_frame, latest_result, last_gollum_state, camera_active, cap, model, ibc_tracker
+    global latest_frame, latest_result, last_gollum_state, camera_active, cap, model, ibc_tracker, ibc_fill_status
 
     # Cache zones for performance
     zones = get_cached_zones()
@@ -539,6 +564,8 @@ def detection_loop():
 
                     if best_detection:
                         fake_boxes.append(FakeBox(ibc_id, best_detection['bbox']))
+                        # Store fill status for this IBC
+                        ibc_fill_status[ibc_id] = best_detection['class']
 
             if current_time - zone_refresh_time < 0.1:
                 print(f"DEBUG: Created {len(fake_boxes)} fake boxes")
@@ -566,7 +593,7 @@ def detection_loop():
             # Process IBC tracking and zone occupancy
             occupied_zone_ids = set()
             if results[0].boxes is not None and len(zones) > 0:
-                occupied_zone_ids = process_ibc_tracking(results[0].boxes, zones, current_time)
+                occupied_zone_ids = process_ibc_tracking(results[0].boxes, zones, current_time, model)
 
             # Check if target object was detected (IBC for pharma, gollum for original)
             target_found = False
@@ -595,6 +622,7 @@ def detection_loop():
         # Emit zone occupancy on every frame (for real-time UI updates)
         socketio.emit('zone_occupancy', {
             'occupied_zone_ids': list(occupied_zone_ids),
+            'ibc_status': ibc_fill_status.copy(),  # Send IBC ID -> class name mapping
             'timestamp': time.time()
         })
 
@@ -805,7 +833,10 @@ def set_confidence():
 @app.route('/clear_database', methods=['POST'])
 def clear_database():
     """Clear all MongoDB collections"""
-    global active_occupancies
+    global active_occupancies, ibc_fill_status
+
+    # Clear in-memory fill status tracking
+    ibc_fill_status = {}
 
     if not use_mongodb or db is None:
         return jsonify({'status': 'error', 'message': 'MongoDB is not enabled'}), 400

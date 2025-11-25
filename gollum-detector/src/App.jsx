@@ -25,6 +25,7 @@ function App() {
   const [confidence, setConfidence] = useState(0.7)
   const [zones, setZones] = useState([])
   const [occupiedZoneIds, setOccupiedZoneIds] = useState([])
+  const [ibcStatus, setIbcStatus] = useState({})
   const socketRef = useRef(null)
   const liveCanvasRef = useRef(null)
 
@@ -227,6 +228,7 @@ function App() {
       socketRef.current.on('zone_occupancy', (data) => {
         console.log('Zone occupancy:', data.occupied_zone_ids)
         setOccupiedZoneIds(data.occupied_zone_ids || [])
+        setIbcStatus(data.ibc_status || {})
       })
 
       return () => {
@@ -448,6 +450,47 @@ function App() {
                 </div>
               )}
             </div>
+
+            {cameraActive && Object.keys(ibcStatus).length > 0 && (
+              <div className="ibc-status-list" style={{
+                marginTop: '20px',
+                padding: '16px',
+                background: 'rgba(255, 255, 255, 0.05)',
+                borderRadius: '8px',
+                border: '1px solid rgba(255, 255, 255, 0.1)'
+              }}>
+                <h3 style={{
+                  margin: '0 0 12px 0',
+                  fontSize: '16px',
+                  fontWeight: '600',
+                  color: '#e0e0e0'
+                }}>Detected IBCs</h3>
+                <div style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px'
+                }}>
+                  {Object.entries(ibcStatus).map(([ibcId, className]) => (
+                    <div key={ibcId} style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      padding: '8px 12px',
+                      background: 'rgba(255, 255, 255, 0.03)',
+                      borderRadius: '4px',
+                      border: '1px solid rgba(255, 255, 255, 0.1)'
+                    }}>
+                      <span style={{
+                        fontWeight: '600',
+                        color: '#4285f4'
+                      }}>IBC-{ibcId}</span>
+                      <span style={{
+                        color: className.toLowerCase().endsWith('empty') ? '#34a853' : '#fbbc04'
+                      }}>{className}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="action-buttons">
               {!cameraActive ? (
