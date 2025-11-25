@@ -8,6 +8,7 @@ from flask_socketio import SocketIO, emit
 from ultralytics import YOLO
 from pymongo import MongoClient
 from bson import ObjectId
+from dotenv import load_dotenv
 import cv2
 import threading
 import requests
@@ -16,6 +17,9 @@ import os
 import json
 import base64
 import numpy as np
+
+# Load environment variables from .env-local
+load_dotenv('.env-local')
 
 app = Flask(__name__)
 CORS(app)
@@ -35,9 +39,15 @@ confidence_threshold = 0.5  # Default confidence threshold
 
 # Roboflow API configuration
 USE_ROBOFLOW_API = True  # Set to True to use Roboflow hosted inference
-ROBOFLOW_API_KEY = "g3kyzU8K82YQwalVS2Ks"
+ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY', 'g3kyzU8K82YQwalVS2Ks')
 ROBOFLOW_WORKSPACE = "die-counter"
 ROBOFLOW_PROJECT = "pharma-demo-v2-5mkw0"
+
+# Push notification configuration (Pushover)
+PUSHOVER_USER_KEY = os.getenv('PUSHOVER_USER_KEY')
+PUSHOVER_API_TOKEN = os.getenv('PUSHOVER_API_TOKEN')
+ENABLE_PUSH_NOTIFICATIONS = os.getenv('ENABLE_PUSH_NOTIFICATIONS', 'True').lower() == 'true'
+PUSHOVER_API_URL = "https://api.pushover.net/1/messages.json"
 ROBOFLOW_VERSION = 7
 ROBOFLOW_API_URL = f"https://detect.roboflow.com/{ROBOFLOW_PROJECT}/{ROBOFLOW_VERSION}"
 
@@ -103,6 +113,52 @@ def get_cached_zones():
         return zones
     return load_zones_from_file()
 
+def send_push_notification(title, message, priority="high", tags=None):
+    """Send a push notification via Pushover"""
+    if not ENABLE_PUSH_NOTIFICATIONS:
+        return
+
+    if not PUSHOVER_USER_KEY or not PUSHOVER_API_TOKEN:
+        print("⚠️ Pushover credentials not configured")
+        return
+
+    try:
+        # Map priority to Pushover priority values
+        # Pushover: -2 (silent), -1 (quiet), 0 (normal), 1 (high), 2 (emergency)
+        priority_map = {
+            "low": -1,
+            "normal": 0,
+            "high": 1,
+            "urgent": 2
+        }
+
+        data = {
+            "token": PUSHOVER_API_TOKEN,
+            "user": PUSHOVER_USER_KEY,
+            "title": title,
+            "message": message,
+            "priority": priority_map.get(priority.lower(), 0)
+        }
+
+        # For emergency priority, require acknowledgment
+        if data["priority"] == 2:
+            data["retry"] = 30  # Retry every 30 seconds
+            data["expire"] = 3600  # Expire after 1 hour
+
+        response = requests.post(
+            PUSHOVER_API_URL,
+            data=data,
+            timeout=5
+        )
+
+        if response.status_code == 200:
+            print(f"✓ Push notification sent: {title}")
+        else:
+            result = response.json()
+            print(f"✗ Failed to send push notification: {result.get('errors', response.status_code)}")
+    except Exception as e:
+        print(f"✗ Error sending push notification: {e}")
+
 def record_zone_entry(ibc_id, zone, enter_time):
     """Record an IBC entering a zone"""
     global active_occupancies
@@ -151,6 +207,14 @@ def record_zone_entry(ibc_id, zone, enter_time):
                     compliance_events_collection.insert_one(event)
                     print(f"⚠️ COMPLIANCE VIOLATION: {reason} - entered {zone['name']}")
 
+                    # Send push notification
+                    send_push_notification(
+                        title="🚨 GMP Compliance Alert",
+                        message=f"IBC-{ibc_id}: {reason} - entered {zone['name']}",
+                        priority="urgent",
+                        tags="rotating_light,warning"
+                    )
+
         # Check for non-empty IBC entering Washroom
         if zone['name'].lower() == 'washroom' and compliance_events_collection is not None:
             fill_status = ibc_fill_status.get(ibc_id, '')
@@ -168,6 +232,14 @@ def record_zone_entry(ibc_id, zone, enter_time):
                 }
                 compliance_events_collection.insert_one(event)
                 print(f"⚠️ COMPLIANCE VIOLATION: Non-empty IBC ({fill_status}) entered Washroom")
+
+                # Send push notification
+                send_push_notification(
+                    title="🚨 GMP Compliance Alert",
+                    message=f"IBC-{ibc_id}: Non-empty IBC ({fill_status}) entered Washroom",
+                    priority="urgent",
+                    tags="rotating_light,warning"
+                )
 
 def update_ibc_tracking(ibc_id, current_time):
     """Update IBC first_seen and last_seen timestamps"""
@@ -876,6 +948,20 @@ def clear_database():
         })
     except Exception as e:
         print(f"Error clearing database: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/test_notification', methods=['POST'])
+def test_notification():
+    """Send a test push notification"""
+    try:
+        send_push_notification(
+            title="🧪 GMP Compliance Test",
+            message="Test notification from your GMP Wash Cycle Compliance system. If you see this on your watch, notifications are working!",
+            priority="high"
+        )
+        return jsonify({'status': 'sent', 'message': 'Test notification sent successfully'})
+    except Exception as e:
+        print(f"Error sending test notification: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # ============================================================

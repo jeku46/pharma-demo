@@ -1,0 +1,32 @@
+# Environment files
+.env-local
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model files
+*.pt
+runs/
+
+# Data
+*.db
+*.sqlite
