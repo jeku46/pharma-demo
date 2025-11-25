@@ -128,11 +128,8 @@ def record_zone_entry(ibc_id, zone, enter_time):
                 needs_wash = False
                 reason = ""
 
-                # Check if IBC needs washing
-                if not ibc.get('last_cleaned'):
-                    needs_wash = True
-                    reason = "IBC has never been washed"
-                else:
+                # Check if IBC needs washing (only check if has been washed before)
+                if ibc.get('last_cleaned'):
                     days_since_wash = (enter_time - ibc['last_cleaned']) / 86400
                     if days_since_wash > 7:
                         needs_wash = True

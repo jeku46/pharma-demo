@@ -284,8 +284,8 @@ function App() {
   }
 
   const switchMode = (newMode) => {
-    // Stop camera when switching modes
-    if (mode === 'live' && cameraActive) {
+    // Only stop camera when switching to upload mode
+    if (newMode === 'upload' && cameraActive) {
       stopCamera()
     }
     setMode(newMode)
