@@ -11,15 +11,13 @@ function App() {
   const [mode, setMode] = useState('live')
 
   // Upload mode state
-  const [selectedImage, setSelectedImage] = useState(null)
-  const [previewUrl, setPreviewUrl] = useState(null)
+
   const [detectionResult, setDetectionResult] = useState(null)
   const [error, setError] = useState(null)
 
   // Live detection state
   const [cameraActive, setCameraActive] = useState(false)
   const [liveDetection, setLiveDetection] = useState(null)
-  const [lastGollumSpotted, setLastGollumSpotted] = useState(null)
   const [confidence, setConfidence] = useState(0.7)
   const [zones, setZones] = useState([])
   const [occupiedZoneIds, setOccupiedZoneIds] = useState([])
@@ -28,29 +26,7 @@ function App() {
   const socketRef = useRef(null)
   const liveCanvasRef = useRef(null)
 
-  const handleImageSelect = async (file) => {
-    if (file && file.type.startsWith('image/')) {
-      setSelectedImage(file)
-      setDetectionResult(null)
-      setError(null)
-
-      // Turn off both LEDs when image is uploaded
-      try {
-        await Promise.all([
-          fetch('/api/led/red/off', { method: 'POST' }),
-          fetch('/api/led/green/off', { method: 'POST' })
-        ])
-      } catch (err) {
-        console.error('Failed to turn off LEDs:', err)
-      }
-
-      const reader = new FileReader()
-      reader.onloadend = () => {
-        setPreviewUrl(reader.result)
-      }
-      reader.readAsDataURL(file)
-    }
-  }
+  
 
 
   // Fetch zones when in live mode
@@ -142,9 +118,6 @@ function App() {
       socketRef.current.on('detection', (data) => {
         console.log('Detection event:', data)
         setLiveDetection(data)
-        if (data.gollum_found) {
-          setLastGollumSpotted(new Date(data.timestamp * 1000))
-        }
       })
 
       socketRef.current.on('zone_occupancy', (data) => {
