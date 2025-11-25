@@ -11,12 +11,14 @@ function App() {
   const [mode, setMode] = useState('upload')
 
   // Upload mode state
-  const [selectedImage, setSelectedImage] = useState(null)
+  const [selectedVideo, setSelectedVideo] = useState(null)
   const [previewUrl, setPreviewUrl] = useState(null)
   const [isDragging, setIsDragging] = useState(false)
   const [isDetecting, setIsDetecting] = useState(false)
   const [detectionResult, setDetectionResult] = useState(null)
   const [error, setError] = useState(null)
+  const [processingProgress, setProcessingProgress] = useState({ current: 0, total: 0 })
+  const [processedFrame, setProcessedFrame] = useState(null)
 
   // Live detection state
   const [cameraActive, setCameraActive] = useState(false)
@@ -29,13 +31,13 @@ function App() {
   const socketRef = useRef(null)
   const liveCanvasRef = useRef(null)
 
-  const handleImageSelect = async (file) => {
-    if (file && file.type.startsWith('image/')) {
-      setSelectedImage(file)
+  const handleVideoSelect = async (file) => {
+    if (file && file.type.startsWith('video/')) {
+      setSelectedVideo(file)
       setDetectionResult(null)
       setError(null)
 
-      // Turn off both LEDs when image is uploaded
+      // Turn off both LEDs when video is uploaded
       try {
         await Promise.all([
           fetch('/api/led/red/off', { method: 'POST' }),
@@ -45,17 +47,15 @@ function App() {
         console.error('Failed to turn off LEDs:', err)
       }
 
-      const reader = new FileReader()
-      reader.onloadend = () => {
-        setPreviewUrl(reader.result)
-      }
-      reader.readAsDataURL(file)
+      // Use URL.createObjectURL for videos (more efficient than data URL)
+      const videoUrl = URL.createObjectURL(file)
+      setPreviewUrl(videoUrl)
     }
   }
 
   const handleFileInput = (e) => {
     const file = e.target.files[0]
-    handleImageSelect(file)
+    handleVideoSelect(file)
   }
 
   const handleDragOver = (e) => {
@@ -72,80 +72,86 @@ function App() {
     e.preventDefault()
     setIsDragging(false)
     const file = e.dataTransfer.files[0]
-    handleImageSelect(file)
+    handleVideoSelect(file)
   }
 
   const detectGollum = async () => {
-    if (!previewUrl) return
+    if (!selectedVideo) return
 
     setIsDetecting(true)
     setError(null)
     setDetectionResult(null)
-
-    // Turn off both LEDs when detection starts
-    try {
-      await Promise.all([
-        fetch('/api/led/red/off', { method: 'POST' }),
-        fetch('/api/led/green/off', { method: 'POST' })
-      ])
-    } catch (err) {
-      console.error('Failed to turn off LEDs:', err)
-    }
+    setProcessingProgress({ current: 0, total: 0 })
+    setProcessedFrame(null)
 
     try {
-      console.log('Sending request to Roboflow...')
-      const response = await fetch('https://serverless.roboflow.com/die-counter/workflows/gollum-finder-2', {
+      console.log('Uploading video to backend for processing...')
+
+      // Create FormData to upload video file
+      const formData = new FormData()
+      formData.append('video', selectedVideo)
+
+      const response = await fetch(`${BACKEND_URL}/process_video`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          api_key: 'g3kyzU8K82YQwalVS2Ks',
-          inputs: {
-            "image": {"type": "base64", "value": previewUrl.split(',')[1]},
-            "confidence": "0.95"
-          }
-        })
+        body: formData
       })
 
-      console.log('Response status:', response.status)
       const result = await response.json()
       console.log('Result:', result)
 
       if (!response.ok) {
-        setError(`API Error: ${result.message || 'Unknown error'}`)
-        console.error('API returned error:', result)
+        setError(`Processing Error: ${result.message || 'Unknown error'}`)
+        console.error('Backend returned error:', result)
       } else {
         setDetectionResult(result)
-
-        // Check if gollum was found and turn on appropriate LED
-        const predictions = result?.outputs?.[0]?.predictions?.predictions
-        const gollumFound = predictions?.some(pred => pred.class === 'gollum')
-
-        try {
-          if (gollumFound) {
-            await fetch('/api/led/red/on', { method: 'POST' })
-          } else {
-            await fetch('/api/led/green/on', { method: 'POST' })
-          }
-        } catch (err) {
-          console.error('Failed to control LED:', err)
-        }
+        console.log(`Processed ${result.frames_processed} frames from ${result.total_frames} total frames`)
+        console.log(`Duration: ${result.duration?.toFixed(2)}s, FPS: ${result.fps}`)
+        console.log(`IBC Status:`, result.ibc_status)
       }
     } catch (err) {
-      setError('Failed to detect Gollum. Please try again.')
-      console.error('Detection error:', err)
+      setError('Failed to process video. Please try again.')
+      console.error('Processing error:', err)
     } finally {
       setIsDetecting(false)
     }
   }
 
   const handleReset = () => {
-    setSelectedImage(null)
+    setSelectedVideo(null)
     setPreviewUrl(null)
     setDetectionResult(null)
     setError(null)
+    setProcessedFrame(null)
+    setProcessingProgress({ current: 0, total: 0 })
   }
+
+  // WebSocket listeners for video processing
+  useEffect(() => {
+    if (mode === 'upload' && socketRef.current) {
+      const socket = socketRef.current
+
+      socket.on('video_processing_start', (data) => {
+        console.log('Video processing started:', data)
+        setProcessingProgress({ current: 0, total: data.total_frames })
+      })
+
+      socket.on('video_frame_processed', (data) => {
+        setProcessedFrame(`data:image/jpeg;base64,${data.image}`)
+        setProcessingProgress({ current: data.frames_processed, total: data.total_frames })
+      })
+
+      socket.on('video_processing_complete', (data) => {
+        console.log('Video processing complete:', data)
+        setIsDetecting(false)
+      })
+
+      return () => {
+        socket.off('video_processing_start')
+        socket.off('video_frame_processed')
+        socket.off('video_processing_complete')
+      }
+    }
+  }, [mode])
 
   // Fetch zones when in live mode
   useEffect(() => {
@@ -208,15 +214,15 @@ function App() {
     }
   }, [mode, cameraActive, zones, occupiedZoneIds])
 
-  // WebSocket connection for live detection
+  // WebSocket connection for all modes
   useEffect(() => {
+    socketRef.current = io(BACKEND_URL)
+
+    socketRef.current.on('connected', (data) => {
+      console.log('WebSocket connected:', data)
+    })
+
     if (mode === 'live') {
-      socketRef.current = io(BACKEND_URL)
-
-      socketRef.current.on('connected', (data) => {
-        console.log('WebSocket connected:', data)
-      })
-
       socketRef.current.on('detection', (data) => {
         console.log('Detection event:', data)
         setLiveDetection(data)
@@ -230,13 +236,13 @@ function App() {
         setOccupiedZoneIds(data.occupied_zone_ids || [])
         setIbcStatus(data.ibc_status || {})
       })
+    }
 
-      return () => {
-        if (socketRef.current) {
-          socketRef.current.disconnect()
-        }
-        setOccupiedZoneIds([])
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect()
       }
+      setOccupiedZoneIds([])
     }
   }, [mode])
 
@@ -301,7 +307,7 @@ function App() {
       <header className="app-header">
         <h1>GMP Wash Cycle Compliance</h1>
         <p className="subtitle">
-          {mode === 'upload' ? 'Upload an image to detect IBC presence' :
+          {mode === 'upload' ? 'Upload a video to detect IBC presence' :
            mode === 'live' ? 'Live IBC monitoring and zone tracking' :
            mode === 'zones' ? 'Define spatial zones for detection areas' :
            'Analytics and compliance monitoring'}
@@ -312,7 +318,7 @@ function App() {
             className={`mode-button ${mode === 'upload' ? 'active' : ''}`}
             onClick={() => switchMode('upload')}
           >
-            Image Upload
+            Video Upload
           </button>
           <button
             className={`mode-button ${mode === 'live' ? 'active' : ''}`}
@@ -359,13 +365,13 @@ function App() {
                   d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
                 />
               </svg>
-              <p className="upload-text">Drag and drop an image here</p>
+              <p className="upload-text">Drag and drop a video here</p>
               <p className="upload-text-or">or</p>
               <label className="upload-button">
                 Choose File
                 <input
                   type="file"
-                  accept="image/*"
+                  accept="video/*"
                   onChange={handleFileInput}
                   style={{ display: 'none' }}
                 />
@@ -375,12 +381,40 @@ function App() {
         ) : (
           <div className="preview-container">
             <div className="preview-image-wrapper">
-              <img src={previewUrl} alt="Uploaded preview" className="preview-image" />
+              {processedFrame && isDetecting ? (
+                <img src={processedFrame} alt="Processing with detections" className="preview-image" />
+              ) : (
+                <video
+                  src={previewUrl}
+                  controls
+                  className="preview-image"
+                  preload="metadata"
+                  playsInline
+                />
+              )}
             </div>
+
+            {isDetecting && processingProgress.total > 0 && (
+              <div style={{ margin: '10px 0', color: '#e0e0e0' }}>
+                <div style={{ marginBottom: '5px' }}>
+                  Processing: {processingProgress.current} / {processingProgress.total} frames
+                  ({((processingProgress.current / processingProgress.total) * 100).toFixed(1)}%)
+                </div>
+                <div style={{ width: '100%', height: '20px', backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: '10px', overflow: 'hidden' }}>
+                  <div style={{
+                    width: `${(processingProgress.current / processingProgress.total) * 100}%`,
+                    height: '100%',
+                    backgroundColor: '#4285f4',
+                    transition: 'width 0.2s'
+                  }} />
+                </div>
+              </div>
+            )}
+
             <div className="image-info">
-              <p className="file-name">{selectedImage.name}</p>
+              <p className="file-name">{selectedVideo.name}</p>
               <p className="file-size">
-                {(selectedImage.size / 1024).toFixed(2)} KB
+                {(selectedVideo.size / 1024).toFixed(2)} KB
               </p>
             </div>
 
@@ -390,10 +424,10 @@ function App() {
                 onClick={detectGollum}
                 disabled={isDetecting}
               >
-                {isDetecting ? 'Detecting...' : 'Detect Gollum'}
+                {isDetecting ? 'Processing Video...' : 'Track IBCs'}
               </button>
               <button className="reset-button" onClick={handleReset}>
-                Upload Another Image
+                Upload Another Video
               </button>
             </div>
 
