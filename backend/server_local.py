@@ -8,6 +8,7 @@ from flask_socketio import SocketIO, emit
 from ultralytics import YOLO
 from pymongo import MongoClient
 from bson import ObjectId
+from ibc_mapper import IBCMapper
 import cv2
 import threading
 import requests
@@ -108,7 +109,7 @@ def record_zone_entry(ibc_id, zone, enter_time):
     global active_occupancies
 
     doc = {
-        'ibc_id': int(ibc_id),
+        'ibc_id': ibc_id,  # Store as string (IBC-1, IBC-2)
         'zone_id': zone['_id'],
         'zone_name': zone['name'],
         'enter_time': enter_time,
@@ -124,7 +125,7 @@ def record_zone_entry(ibc_id, zone, enter_time):
         # Check for compliance violations
         # If IBC enters a non-Washroom zone and needs cleaning, log it
         if zone['name'].lower() != 'washroom' and ibcs_collection is not None:
-            ibc = ibcs_collection.find_one({'ibc_id': int(ibc_id)})
+            ibc = ibcs_collection.find_one({'ibc_id': ibc_id})
             if ibc:
                 needs_wash = False
                 reason = ""
@@ -140,7 +141,7 @@ def record_zone_entry(ibc_id, zone, enter_time):
                 if needs_wash and compliance_events_collection is not None:
                     event = {
                         'timestamp': enter_time,
-                        'ibc_id': int(ibc_id),
+                        'ibc_id': ibc_id,  # Store as string (IBC-1, IBC-2)
                         'zone_id': zone['_id'],
                         'zone_name': zone['name'],
                         'event_type': 'unwashed_entry',
@@ -158,7 +159,7 @@ def record_zone_entry(ibc_id, zone, enter_time):
                 # Non-empty IBC entered washroom
                 event = {
                     'timestamp': enter_time,
-                    'ibc_id': int(ibc_id),
+                    'ibc_id': ibc_id,  # Store as string (IBC-1, IBC-2)
                     'zone_id': zone['_id'],
                     'zone_name': zone['name'],
                     'event_type': 'non_empty_washroom_entry',
@@ -221,7 +222,7 @@ def process_ibc_tracking(boxes, zones, current_time, model=None):
         if box.id is None:
             continue
 
-        ibc_id = int(box.id[0])
+        ibc_id = box.id[0]  # Keep as string (IBC-1, IBC-2) or int for local model
         center = get_box_center(box)
 
         # Capture fill status (class name) for this IBC
@@ -235,7 +236,7 @@ def process_ibc_tracking(boxes, zones, current_time, model=None):
 
         current_ibc_zones[ibc_id] = set()
 
-        print(f"DEBUG: IBC-{ibc_id} at position {center}")
+        print(f"DEBUG: {ibc_id} at position {center}")
 
         for zone in zones:
             in_zone = point_in_zone(center, zone)
@@ -385,8 +386,9 @@ class CentroidTracker:
 
         return self.objects
 
-# Initialize tracker
+# Initialize tracker and IBC mapper
 ibc_tracker = CentroidTracker(max_disappeared=30)
+ibc_mapper = IBCMapper(num_ibcs=2)  # We have 2 IBCs: IBC-1 and IBC-2
 
 def detect_with_roboflow(frame, confidence_threshold):
     """
@@ -495,7 +497,7 @@ def draw_detections(frame, detections, tracked_objects):
 
 def detection_loop():
     """Main detection loop running in a separate thread"""
-    global latest_frame, latest_result, last_gollum_state, camera_active, cap, model, ibc_tracker, ibc_fill_status
+    global latest_frame, latest_result, last_gollum_state, camera_active, cap, model, ibc_tracker, ibc_mapper, ibc_fill_status
 
     # Cache zones for performance
     zones = get_cached_zones()
@@ -531,9 +533,14 @@ def detection_loop():
 
             print(f"DEBUG FRAME: {len(tracked_objects)} tracked objects")
 
+            # Map tracker IDs to IBC identities (IBC-1, IBC-2)
+            mapped_ibcs = ibc_mapper.map_detections(tracked_objects)
+
+            print(f"DEBUG FRAME: {len(mapped_ibcs)} mapped IBCs: {list(mapped_ibcs.keys())}")
+
             # Debug logging (first frame only to avoid spam)
             if current_time - zone_refresh_time < 0.1:
-                print(f"DEBUG: {len(zones)} zones loaded, {len(detections)} detections, {len(tracked_objects)} tracked objects")
+                print(f"DEBUG: {len(zones)} zones loaded, {len(detections)} detections, {len(tracked_objects)} tracked objects, {len(mapped_ibcs)} mapped IBCs")
 
             # Draw detections with tracking IDs on resized frame
             annotated_frame, matched_detections = draw_detections(resized_frame, detections, tracked_objects)
@@ -546,10 +553,10 @@ def detection_loop():
                     x1, y1, x2, y2 = bbox
                     self.xyxy = [np.array([x1, y1, x2, y2])]
 
-            # Build fake boxes from tracked objects and their matched detections
+            # Build fake boxes from MAPPED IBCs (IBC-1, IBC-2) and their matched detections
             fake_boxes = []
-            for ibc_id, centroid in tracked_objects.items():
-                # Find the detection closest to this tracked object
+            for ibc_identity, centroid in mapped_ibcs.items():
+                # Find the detection closest to this IBC
                 if len(detections) > 0:
                     # Find detection with matching centroid
                     min_dist = float('inf')
@@ -563,9 +570,9 @@ def detection_loop():
                             best_detection = det
 
                     if best_detection:
-                        fake_boxes.append(FakeBox(ibc_id, best_detection['bbox']))
-                        # Store fill status for this IBC
-                        ibc_fill_status[ibc_id] = best_detection['class']
+                        fake_boxes.append(FakeBox(ibc_identity, best_detection['bbox']))
+                        # Store fill status for this IBC (using IBC-1, IBC-2 as keys)
+                        ibc_fill_status[ibc_identity] = best_detection['class']
 
             if current_time - zone_refresh_time < 0.1:
                 print(f"DEBUG: Created {len(fake_boxes)} fake boxes")
@@ -580,7 +587,7 @@ def detection_loop():
             # Check if target object was detected
             target_found = len(detections) > 0
             detected_classes = [d['class'] for d in detections]
-            tracked_ids = list(tracked_objects.keys())
+            tracked_ids = list(mapped_ibcs.keys())  # Use mapped IBC identities (IBC-1, IBC-2)
 
         else:
             # ===== LOCAL YOLO MODEL PATH =====
@@ -1010,7 +1017,7 @@ def get_occupancy():
         # Build query
         query = {}
         if ibc_id:
-            query['ibc_id'] = int(ibc_id)
+            query['ibc_id'] = ibc_id  # Keep as string (IBC-1, IBC-2)
         if zone_id:
             query['zone_id'] = zone_id
         if active_only:
@@ -1083,7 +1090,7 @@ def get_ibcs():
         print(f"Error getting IBCs: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/ibcs/<int:ibc_id>', methods=['GET'])
+@app.route('/ibcs/<ibc_id>', methods=['GET'])  # Accept string IBC IDs (IBC-1, IBC-2)
 def get_ibc(ibc_id):
     """Get specific IBC details"""
     try:
