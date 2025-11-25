@@ -13,6 +13,7 @@ from pymongo import MongoClient
 from bson import ObjectId
 from ibc_mapper import IBCMapper
 from notifications import get_notifier
+from compliance_checker import ComplianceChecker
 import cv2
 import threading
 import requests
@@ -77,6 +78,15 @@ active_occupancies = {}  # {(ibc_id, zone_id): mongo_doc_id}
 ibc_fill_status = {}  # {ibc_id: class_name} - Track fill status of each IBC
 ibc_previous_fill_status = {}  # {ibc_id: class_name} - Track previous fill status to detect changes
 
+# Initialize compliance checker (will be set up after MongoDB connection)
+compliance_checker = None
+if use_mongodb:
+    compliance_checker = ComplianceChecker(
+        ibcs_collection=ibcs_collection,
+        compliance_events_collection=compliance_events_collection,
+        notifier=get_notifier()
+    )
+
 def load_zones_from_file():
     """Load zones from JSON file"""
     if os.path.exists(ZONES_FILE):
@@ -132,132 +142,9 @@ def record_zone_entry(ibc_id, zone, enter_time):
         active_occupancies[(ibc_id, zone['_id'])] = result.inserted_id
         print(f"IBC {ibc_id} ({fill_status_on_entry}) ENTERED zone '{zone['name']}' at {enter_time}")
 
-        # Check for compliance violations
-        # If IBC enters a non-Washroom zone and needs cleaning, log it
-        if zone['name'].lower() != 'washroom' and ibcs_collection is not None:
-            ibc = ibcs_collection.find_one({'ibc_id': ibc_id})
-            if ibc:
-                needs_wash = False
-                reason = ""
-
-                # Check if IBC needs washing (only check if has been washed before)
-                if ibc.get('last_cleaned'):
-                    days_since_wash = (enter_time - ibc['last_cleaned']) / 86400
-                    if days_since_wash > 7:
-                        needs_wash = True
-                        reason = f"IBC not washed for {days_since_wash:.1f} days"
-
-                # Log compliance event
-                if needs_wash and compliance_events_collection is not None:
-                    event = {
-                        'timestamp': enter_time,
-                        'ibc_id': ibc_id,  # Store as string (IBC-1, IBC-2)
-                        'zone_id': zone['_id'],
-                        'zone_name': zone['name'],
-                        'event_type': 'unwashed_entry',
-                        'severity': 'high',
-                        'reason': reason,
-                        'last_cleaned': ibc.get('last_cleaned')
-                    }
-                    compliance_events_collection.insert_one(event)
-                    print(f"⚠️ COMPLIANCE VIOLATION: {reason} - entered {zone['name']}")
-
-                    # Send push notification
-                    notifier = get_notifier()
-                    notifier.notify_compliance_event(
-                        event_type='unwashed_entry',
-                        ibc_id=ibc_id,
-                        zone_name=zone['name'],
-                        reason=reason,
-                        severity='high'
-                    )
-
-        # Check for unwashed IBC entering a Station zone
-        if 'station' in zone['name'].lower() and ibcs_collection is not None:
-            ibc = ibcs_collection.find_one({'ibc_id': ibc_id})
-            if ibc and ibc.get('needs_wash'):
-                reason = f"Unwashed IBC entered {zone['name']}"
-                event = {
-                    'timestamp': enter_time,
-                    'ibc_id': ibc_id,
-                    'zone_id': zone['_id'],
-                    'zone_name': zone['name'],
-                    'event_type': 'unwashed_station_entry',
-                    'severity': 'high',
-                    'reason': reason,
-                    'needs_wash_since': ibc['needs_wash']
-                }
-                if compliance_events_collection is not None:
-                    compliance_events_collection.insert_one(event)
-                print(f"⚠️ COMPLIANCE VIOLATION: {reason}")
-
-                # Send push notification
-                notifier = get_notifier()
-                notifier.notify_compliance_event(
-                    event_type='unwashed_station_entry',
-                    ibc_id=ibc_id,
-                    zone_name=zone['name'],
-                    reason=reason,
-                    severity='high'
-                )
-
-        # Check for IBC filled with API entering Station 2
-        if 'station 2' in zone['name'].lower():
-            fill_status = ibc_fill_status.get(ibc_id, '')
-            if fill_status and 'api' in fill_status.lower() and 'empty' not in fill_status.lower():
-                reason = f"IBC filled with API entered {zone['name']}"
-                event = {
-                    'timestamp': enter_time,
-                    'ibc_id': ibc_id,
-                    'zone_id': zone['_id'],
-                    'zone_name': zone['name'],
-                    'event_type': 'api_filled_station2_entry',
-                    'severity': 'high',
-                    'reason': reason,
-                    'fill_status': fill_status
-                }
-                if compliance_events_collection is not None:
-                    compliance_events_collection.insert_one(event)
-                print(f"⚠️ COMPLIANCE VIOLATION: {reason}")
-
-                # Send push notification
-                notifier = get_notifier()
-                notifier.notify_compliance_event(
-                    event_type='api_filled_station2_entry',
-                    ibc_id=ibc_id,
-                    zone_name=zone['name'],
-                    reason=reason,
-                    severity='high'
-                )
-
-        # Check for non-empty IBC entering Washroom
-        if zone['name'].lower() == 'washroom' and compliance_events_collection is not None:
-            fill_status = ibc_fill_status.get(ibc_id, '')
-            if fill_status and not fill_status.lower().endswith('empty'):
-                # Non-empty IBC entered washroom
-                reason = f"Non-empty IBC ({fill_status}) entered Washroom"
-                event = {
-                    'timestamp': enter_time,
-                    'ibc_id': ibc_id,  # Store as string (IBC-1, IBC-2)
-                    'zone_id': zone['_id'],
-                    'zone_name': zone['name'],
-                    'event_type': 'non_empty_washroom_entry',
-                    'severity': 'high',
-                    'reason': reason,
-                    'fill_status': fill_status
-                }
-                compliance_events_collection.insert_one(event)
-                print(f"⚠️ COMPLIANCE VIOLATION: {reason}")
-
-                # Send push notification
-                notifier = get_notifier()
-                notifier.notify_compliance_event(
-                    event_type='non_empty_washroom_entry',
-                    ibc_id=ibc_id,
-                    zone_name=zone['name'],
-                    reason=reason,
-                    severity='high'
-                )
+        # Check for compliance violations using the helper class
+        if compliance_checker is not None:
+            compliance_checker.check_zone_entry(ibc_id, zone, enter_time, fill_status_on_entry)
 
 def update_ibc_tracking(ibc_id, current_time):
     """Update IBC first_seen and last_seen timestamps"""
@@ -749,8 +636,7 @@ def detection_loop():
             if zone_id in zone_ibc_mapping:
                 for ibc_id in zone_ibc_mapping[zone_id]:
                     fill_status = ibc_fill_status.get(ibc_id, '')
-                    # Non-empty IBC in Washroom is non-compliant
-                    if zone['name'].lower() == 'washroom' and fill_status and not fill_status.lower().endswith('empty'):
+                    if compliance_checker and compliance_checker.is_non_compliant(ibc_id, zone, fill_status):
                         non_compliant_zone_ids.add(zone_id)
 
         # Emit zone occupancy on every frame (for real-time UI updates)
