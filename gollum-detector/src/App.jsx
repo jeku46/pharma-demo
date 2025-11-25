@@ -7,14 +7,12 @@ import './App.css'
 const BACKEND_URL = 'http://localhost:5001'
 
 function App() {
-  // Mode: 'upload' or 'live'
-  const [mode, setMode] = useState('upload')
+  // Mode: 'live', 'zones', or 'insights'
+  const [mode, setMode] = useState('live')
 
   // Upload mode state
   const [selectedImage, setSelectedImage] = useState(null)
   const [previewUrl, setPreviewUrl] = useState(null)
-  const [isDragging, setIsDragging] = useState(false)
-  const [isDetecting, setIsDetecting] = useState(false)
   const [detectionResult, setDetectionResult] = useState(null)
   const [error, setError] = useState(null)
 
@@ -54,99 +52,6 @@ function App() {
     }
   }
 
-  const handleFileInput = (e) => {
-    const file = e.target.files[0]
-    handleImageSelect(file)
-  }
-
-  const handleDragOver = (e) => {
-    e.preventDefault()
-    setIsDragging(true)
-  }
-
-  const handleDragLeave = (e) => {
-    e.preventDefault()
-    setIsDragging(false)
-  }
-
-  const handleDrop = (e) => {
-    e.preventDefault()
-    setIsDragging(false)
-    const file = e.dataTransfer.files[0]
-    handleImageSelect(file)
-  }
-
-  const detectGollum = async () => {
-    if (!previewUrl) return
-
-    setIsDetecting(true)
-    setError(null)
-    setDetectionResult(null)
-
-    // Turn off both LEDs when detection starts
-    try {
-      await Promise.all([
-        fetch('/api/led/red/off', { method: 'POST' }),
-        fetch('/api/led/green/off', { method: 'POST' })
-      ])
-    } catch (err) {
-      console.error('Failed to turn off LEDs:', err)
-    }
-
-    try {
-      console.log('Sending request to Roboflow...')
-      const response = await fetch('https://serverless.roboflow.com/die-counter/workflows/gollum-finder-2', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          api_key: import.meta.env.VITE_ROBOFLOW_API_KEY,
-          inputs: {
-            "image": {"type": "base64", "value": previewUrl.split(',')[1]},
-            "confidence": "0.95"
-          }
-        })
-      })
-
-      console.log('Response status:', response.status)
-      const result = await response.json()
-      console.log('Result:', result)
-
-      if (!response.ok) {
-        setError(`API Error: ${result.message || 'Unknown error'}`)
-        console.error('API returned error:', result)
-      } else {
-        setDetectionResult(result)
-
-        // Check if gollum was found and turn on appropriate LED
-        const predictions = result?.outputs?.[0]?.predictions?.predictions
-        const gollumFound = predictions?.some(pred => pred.class === 'gollum')
-
-        try {
-          if (gollumFound) {
-            await fetch('/api/led/red/on', { method: 'POST' })
-          } else {
-            await fetch('/api/led/green/on', { method: 'POST' })
-          }
-        } catch (err) {
-          console.error('Failed to control LED:', err)
-        }
-      }
-    } catch (err) {
-      setError('Failed to detect Gollum. Please try again.')
-      console.error('Detection error:', err)
-    } finally {
-      setIsDetecting(false)
-    }
-  }
-
-  const handleReset = () => {
-    setSelectedImage(null)
-    setPreviewUrl(null)
-    setDetectionResult(null)
-    setError(null)
-  }
 
   // Fetch zones when in live mode
   useEffect(() => {
@@ -320,19 +225,12 @@ function App() {
       <header className="app-header">
         <h1>GMP Wash Cycle Compliance</h1>
         <p className="subtitle">
-          {mode === 'upload' ? 'Upload an image to detect IBC presence' :
-           mode === 'live' ? 'Live IBC monitoring and zone tracking' :
+          {mode === 'live' ? 'Live IBC monitoring and zone tracking' :
            mode === 'zones' ? 'Define spatial zones for detection areas' :
            'Analytics and compliance monitoring'}
         </p>
 
         <div className="mode-switcher">
-          <button
-            className={`mode-button ${mode === 'upload' ? 'active' : ''}`}
-            onClick={() => switchMode('upload')}
-          >
-            Image Upload
-          </button>
           <button
             className={`mode-button ${mode === 'live' ? 'active' : ''}`}
             onClick={() => switchMode('live')}
@@ -355,75 +253,7 @@ function App() {
       </header>
 
       <main className="app-main">
-        {mode === 'upload' ? (
-          !previewUrl ? (
-          <div
-            className={`upload-zone ${isDragging ? 'dragging' : ''}`}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-          >
-            <div className="upload-content">
-              <svg
-                className="upload-icon"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-                xmlns="http://www.w3.org/2000/svg"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
-                />
-              </svg>
-              <p className="upload-text">Drag and drop an image here</p>
-              <p className="upload-text-or">or</p>
-              <label className="upload-button">
-                Choose File
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleFileInput}
-                  style={{ display: 'none' }}
-                />
-              </label>
-            </div>
-          </div>
-        ) : (
-          <div className="preview-container">
-            <div className="preview-image-wrapper">
-              <img src={previewUrl} alt="Uploaded preview" className="preview-image" />
-            </div>
-            <div className="image-info">
-              <p className="file-name">{selectedImage.name}</p>
-              <p className="file-size">
-                {(selectedImage.size / 1024).toFixed(2)} KB
-              </p>
-            </div>
-
-            <div className="action-buttons">
-              <button
-                className="detect-button"
-                onClick={detectGollum}
-                disabled={isDetecting}
-              >
-                {isDetecting ? 'Detecting...' : 'Detect Gollum'}
-              </button>
-              <button className="reset-button" onClick={handleReset}>
-                Upload Another Image
-              </button>
-            </div>
-
-            {error && (
-              <div className="error-message">
-                {error}
-              </div>
-            )}
-          </div>
-        )
-        ) : mode === 'live' ? (
+        {mode === 'live' ? (
           // Live Detection Mode
           <div className="live-container">
             <div className="video-wrapper" style={{ position: 'relative' }}>

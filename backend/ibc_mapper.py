@@ -118,7 +118,7 @@ class IBCMapper:
                                 best_distance = distance
                                 best_ibc = ibc_id
 
-                    if best_ibc and best_distance > 100:  # If it's far from all active IBCs
+                    if best_ibc:
                         # This might be a lost IBC reappearing, check last known positions
                         for ibc_id, last_pos in self.ibc_positions.items():
                             if ibc_id not in self.active_ibcs:
@@ -140,8 +140,8 @@ class IBCMapper:
 
                     # If still unmapped and we determined a best_ibc, this is likely a duplicate detection
                     # We can skip it or log it
-                    if best_ibc and best_distance < 100:
-                        print(f"Warning: Tracker {tracker_id} appears to be a duplicate of {best_ibc} (distance: {best_distance:.1f}px)")
+                    # if best_ibc and best_distance < 100:
+                    #     print(f"Warning: Tracker {tracker_id} appears to be a duplicate of {best_ibc} (distance: {best_distance:.1f}px)")
 
         # Clean up inactive trackers
         active_tracker_ids = set(tracker_ids)

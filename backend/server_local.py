@@ -43,7 +43,7 @@ USE_ROBOFLOW_API = True  # Set to True to use Roboflow hosted inference
 ROBOFLOW_API_KEY = os.environ.get('ROBOFLOW_API_KEY', '')
 ROBOFLOW_WORKSPACE = "die-counter"
 ROBOFLOW_PROJECT = "pharma-demo-v2-5mkw0"
-ROBOFLOW_VERSION = 7
+ROBOFLOW_VERSION = 8
 ROBOFLOW_API_URL = f"https://detect.roboflow.com/{ROBOFLOW_PROJECT}/{ROBOFLOW_VERSION}"
 
 # LED control configuration
@@ -75,6 +75,7 @@ except Exception as e:
 ibc_zone_state = {}  # {ibc_id: {zone_id: enter_time, ...}}
 active_occupancies = {}  # {(ibc_id, zone_id): mongo_doc_id}
 ibc_fill_status = {}  # {ibc_id: class_name} - Track fill status of each IBC
+ibc_previous_fill_status = {}  # {ibc_id: class_name} - Track previous fill status to detect changes
 
 def load_zones_from_file():
     """Load zones from JSON file"""
@@ -171,6 +172,35 @@ def record_zone_entry(ibc_id, zone, enter_time):
                         severity='high'
                     )
 
+        # Check for unwashed IBC entering a Station zone
+        if 'station' in zone['name'].lower() and ibcs_collection is not None:
+            ibc = ibcs_collection.find_one({'ibc_id': ibc_id})
+            if ibc and ibc.get('needs_wash'):
+                reason = f"Unwashed IBC entered {zone['name']}"
+                event = {
+                    'timestamp': enter_time,
+                    'ibc_id': ibc_id,
+                    'zone_id': zone['_id'],
+                    'zone_name': zone['name'],
+                    'event_type': 'unwashed_station_entry',
+                    'severity': 'high',
+                    'reason': reason,
+                    'needs_wash_since': ibc['needs_wash']
+                }
+                if compliance_events_collection is not None:
+                    compliance_events_collection.insert_one(event)
+                print(f"⚠️ COMPLIANCE VIOLATION: {reason}")
+
+                # Send push notification
+                notifier = get_notifier()
+                notifier.notify_compliance_event(
+                    event_type='unwashed_station_entry',
+                    ibc_id=ibc_id,
+                    zone_name=zone['name'],
+                    reason=reason,
+                    severity='high'
+                )
+
         # Check for non-empty IBC entering Washroom
         if zone['name'].lower() == 'washroom' and compliance_events_collection is not None:
             fill_status = ibc_fill_status.get(ibc_id, '')
@@ -209,10 +239,35 @@ def update_ibc_tracking(ibc_id, current_time):
         {'ibc_id': ibc_id},
         {
             '$set': {'last_seen': current_time},
-            '$setOnInsert': {'first_seen': current_time, 'last_cleaned': None}
+            '$setOnInsert': {'first_seen': current_time, 'last_cleaned': None, 'needs_wash': None}
         },
         upsert=True
     )
+
+def check_fill_status_change(ibc_id, new_status, current_time):
+    """Check if IBC transitioned from filled to empty and set needs_wash time"""
+    global ibc_previous_fill_status
+
+    if not use_mongodb or ibcs_collection is None:
+        return
+
+    previous_status = ibc_previous_fill_status.get(ibc_id, '')
+
+    # Check if transitioned from filled (containing API) to empty
+    # "API" in the previous status means it was filled, "Empty" in new status means it's now empty
+    was_filled = previous_status and 'api' in previous_status.lower() and 'empty' not in previous_status.lower()
+    is_now_empty = new_status and 'empty' in new_status.lower()
+
+    if was_filled and is_now_empty:
+        # IBC just became empty after containing API - needs washing now
+        ibcs_collection.update_one(
+            {'ibc_id': ibc_id},
+            {'$set': {'needs_wash': current_time}}
+        )
+        print(f"IBC {ibc_id} emptied (was {previous_status}) - needs wash set to now")
+
+    # Update previous status
+    ibc_previous_fill_status[ibc_id] = new_status
 
 def record_zone_exit(ibc_id, zone_id, exit_time):
     """Record an IBC exiting a zone"""
@@ -265,6 +320,7 @@ def process_ibc_tracking(boxes, zones, current_time, model=None):
         if model is not None and hasattr(box, 'cls'):
             class_id = int(box.cls[0])
             class_name = model.names[class_id]
+            check_fill_status_change(ibc_id, class_name, current_time)
             ibc_fill_status[ibc_id] = class_name
 
         # Update IBC tracking (first_seen, last_seen)
@@ -272,11 +328,8 @@ def process_ibc_tracking(boxes, zones, current_time, model=None):
 
         current_ibc_zones[ibc_id] = set()
 
-        print(f"DEBUG: {ibc_id} at position {center}")
-
         for zone in zones:
             in_zone = point_in_zone(center, zone)
-            print(f"  Zone '{zone['name']}' ({zone['x']},{zone['y']} {zone['width']}x{zone['height']}): {in_zone}")
             if in_zone:
                 current_ibc_zones[ibc_id].add(zone['_id'])
 
@@ -433,7 +486,6 @@ def detect_with_roboflow(frame, confidence_threshold):
     """
     try:
         # Encode frame to base64 (frame should already be resized to 640x480)
-        print(f"DEBUG: Frame shape before encoding: {frame.shape}")
         _, buffer = cv2.imencode('.jpg', frame)
         img_base64 = base64.b64encode(buffer).decode('utf-8')
 
@@ -563,18 +615,16 @@ def detection_loop():
             # Get detections from Roboflow
             detections = detect_with_roboflow(resized_frame, confidence_threshold)
 
-            print(f"DEBUG FRAME: {len(detections)} detections from Roboflow API")
+            # Keep only the top 2 detections by confidence
+            if len(detections) > 2:
+                detections = sorted(detections, key=lambda d: d['confidence'], reverse=True)[:2]
 
             # Update tracker with centroids
             centroids = [d['centroid'] for d in detections]
             tracked_objects = ibc_tracker.update(centroids)
 
-            print(f"DEBUG FRAME: {len(tracked_objects)} tracked objects")
-
             # Map tracker IDs to IBC identities (IBC-1, IBC-2)
             mapped_ibcs = ibc_mapper.map_detections(tracked_objects)
-
-            print(f"DEBUG FRAME: {len(mapped_ibcs)} mapped IBCs: {list(mapped_ibcs.keys())}")
 
             # Debug logging (first frame only to avoid spam)
             if current_time - zone_refresh_time < 0.1:
@@ -609,6 +659,8 @@ def detection_loop():
 
                     if best_detection:
                         fake_boxes.append(FakeBox(ibc_identity, best_detection['bbox']))
+                        # Check for fill status change (API -> Empty triggers needs_wash)
+                        check_fill_status_change(ibc_identity, best_detection['class'], current_time)
                         # Store fill status for this IBC (using IBC-1, IBC-2 as keys)
                         ibc_fill_status[ibc_identity] = best_detection['class']
 
