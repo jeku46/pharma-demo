@@ -106,7 +106,10 @@ def get_cached_zones():
 
 def record_zone_entry(ibc_id, zone, enter_time):
     """Record an IBC entering a zone"""
-    global active_occupancies
+    global active_occupancies, ibc_fill_status
+
+    # Get current fill status
+    fill_status_on_entry = ibc_fill_status.get(ibc_id, 'Unknown')
 
     doc = {
         'ibc_id': ibc_id,  # Store as string (IBC-1, IBC-2)
@@ -114,13 +117,15 @@ def record_zone_entry(ibc_id, zone, enter_time):
         'zone_name': zone['name'],
         'enter_time': enter_time,
         'exit_time': None,
-        'duration': None
+        'duration': None,
+        'fill_status_on_entry': fill_status_on_entry,
+        'fill_status_on_exit': None
     }
 
     if use_mongodb and occupancy_collection is not None:
         result = occupancy_collection.insert_one(doc)
         active_occupancies[(ibc_id, zone['_id'])] = result.inserted_id
-        print(f"IBC {ibc_id} ENTERED zone '{zone['name']}' at {enter_time}")
+        print(f"IBC {ibc_id} ({fill_status_on_entry}) ENTERED zone '{zone['name']}' at {enter_time}")
 
         # Check for compliance violations
         # If IBC enters a non-Washroom zone and needs cleaning, log it
@@ -186,20 +191,26 @@ def update_ibc_tracking(ibc_id, current_time):
 
 def record_zone_exit(ibc_id, zone_id, exit_time):
     """Record an IBC exiting a zone"""
-    global active_occupancies
+    global active_occupancies, ibc_fill_status
 
     key = (ibc_id, zone_id)
     if key in active_occupancies and use_mongodb and occupancy_collection is not None:
         doc_id = active_occupancies[key]
-        # Get enter_time to calculate duration
+        # Get enter_time to calculate duration and get current fill status
         doc = occupancy_collection.find_one({'_id': doc_id})
         if doc:
             duration = exit_time - doc['enter_time']
+            fill_status_on_exit = ibc_fill_status.get(ibc_id, 'Unknown')
+
             occupancy_collection.update_one(
                 {'_id': doc_id},
-                {'$set': {'exit_time': exit_time, 'duration': duration}}
+                {'$set': {
+                    'exit_time': exit_time,
+                    'duration': duration,
+                    'fill_status_on_exit': fill_status_on_exit
+                }}
             )
-            print(f"IBC {ibc_id} EXITED zone '{doc['zone_name']}' after {duration:.1f}s")
+            print(f"IBC {ibc_id} ({fill_status_on_exit}) EXITED zone '{doc['zone_name']}' after {duration:.1f}s")
 
             # If exiting Washroom, update last_cleaned timestamp
             if doc['zone_name'].lower() == 'washroom' and ibcs_collection is not None:
@@ -260,12 +271,12 @@ def process_ibc_tracking(boxes, zones, current_time, model=None):
 
         ibc_zone_state[ibc_id] = current_zones
 
-    # Handle IBCs that disappeared
-    for ibc_id in list(ibc_zone_state.keys()):
-        if ibc_id not in current_ibc_zones:
-            for zone_id in ibc_zone_state[ibc_id]:
-                record_zone_exit(ibc_id, zone_id, current_time)
-            del ibc_zone_state[ibc_id]
+    # Handle IBCs that disappeared from detection
+    # NOTE: We do NOT treat "not detected" as an exit. IBCs are always in frame,
+    # so gaps in tracking should not end occupancy intervals. Only when an IBC
+    # is detected OUTSIDE a zone (handled above in the exits loop) do we record an exit.
+    # We keep the zone state for disappeared IBCs so occupancy continues.
+    # (Removed: code that would record exits and delete state for missing IBCs)
 
     # Return set of all occupied zone IDs
     occupied_zone_ids = set()
@@ -452,30 +463,30 @@ def detect_with_roboflow(frame, confidence_threshold):
         print(f"Roboflow API error: {e}")
         return []
 
-def draw_detections(frame, detections, tracked_objects):
+def draw_detections(frame, detections, mapped_ibcs):
     """
-    Draw bounding boxes and IDs on frame
+    Draw bounding boxes and IBC IDs on frame
     detections: list of detection dicts from detect_with_roboflow
-    tracked_objects: dict from tracker {id: centroid}
-    Returns: annotated frame, list of (id, bbox) tuples
+    mapped_ibcs: dict from mapper {ibc_identity: centroid} (e.g., {"IBC-1": (x, y), "IBC-2": (x, y)})
+    Returns: annotated frame, list of (ibc_id, bbox) tuples
     """
     annotated_frame = frame.copy()
 
     # Map centroids to detection bboxes
-    if len(detections) == 0 or len(tracked_objects) == 0:
+    if len(detections) == 0 or len(mapped_ibcs) == 0:
         return annotated_frame, []
 
     detection_centroids = [d['centroid'] for d in detections]
-    object_ids = list(tracked_objects.keys())
-    object_centroids = list(tracked_objects.values())
+    ibc_identities = list(mapped_ibcs.keys())
+    ibc_centroids = list(mapped_ibcs.values())
 
-    # Match tracked objects to detections
+    # Match mapped IBCs to detections
     import scipy.spatial.distance as dist
-    D = dist.cdist(np.array(object_centroids), np.array(detection_centroids))
+    D = dist.cdist(np.array(ibc_centroids), np.array(detection_centroids))
 
     matched_detections = []
 
-    for i, object_id in enumerate(object_ids):
+    for i, ibc_id in enumerate(ibc_identities):
         if D.shape[1] == 0:
             break
         closest_detection_idx = D[i].argmin()
@@ -486,12 +497,14 @@ def draw_detections(frame, detections, tracked_objects):
             # Draw bounding box
             cv2.rectangle(annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
-            # Draw ID and confidence
-            label = f"IBC-{object_id} ({detection['confidence']:.2f})"
+            # Draw IBC ID, class, and confidence (strip "IBC-" prefixes)
+            ibc_display = ibc_id.replace("IBC-", "")
+            class_display = detection['class'].replace("IBC-", "")
+            label = f"{ibc_display}: {class_display} ({detection['confidence']:.2f})"
             cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-            matched_detections.append((object_id, detection['bbox']))
+            matched_detections.append((ibc_id, detection['bbox']))
 
     return annotated_frame, matched_detections
 
@@ -542,8 +555,8 @@ def detection_loop():
             if current_time - zone_refresh_time < 0.1:
                 print(f"DEBUG: {len(zones)} zones loaded, {len(detections)} detections, {len(tracked_objects)} tracked objects, {len(mapped_ibcs)} mapped IBCs")
 
-            # Draw detections with tracking IDs on resized frame
-            annotated_frame, matched_detections = draw_detections(resized_frame, detections, tracked_objects)
+            # Draw detections with mapped IBC IDs on resized frame
+            annotated_frame, matched_detections = draw_detections(resized_frame, detections, mapped_ibcs)
 
             # Process IBC tracking and zone occupancy
             # Create fake "boxes" structure for compatibility with existing zone tracking code
@@ -626,9 +639,30 @@ def detection_loop():
                 'occupied_zone_ids': list(occupied_zone_ids)
             }
 
+        # Build zone-to-IBC mapping for frontend
+        zone_ibc_mapping = {}  # {zone_id: [ibc_ids]}
+        for ibc_id, zone_ids in ibc_zone_state.items():
+            for zone_id in zone_ids:
+                if zone_id not in zone_ibc_mapping:
+                    zone_ibc_mapping[zone_id] = []
+                zone_ibc_mapping[zone_id].append(ibc_id)
+
+        # Determine which zones have non-compliant IBCs
+        non_compliant_zone_ids = set()
+        for zone in zones:
+            zone_id = zone['_id']
+            if zone_id in zone_ibc_mapping:
+                for ibc_id in zone_ibc_mapping[zone_id]:
+                    fill_status = ibc_fill_status.get(ibc_id, '')
+                    # Non-empty IBC in Washroom is non-compliant
+                    if zone['name'].lower() == 'washroom' and fill_status and not fill_status.lower().endswith('empty'):
+                        non_compliant_zone_ids.add(zone_id)
+
         # Emit zone occupancy on every frame (for real-time UI updates)
         socketio.emit('zone_occupancy', {
             'occupied_zone_ids': list(occupied_zone_ids),
+            'non_compliant_zone_ids': list(non_compliant_zone_ids),
+            'zone_ibc_mapping': zone_ibc_mapping,
             'ibc_status': ibc_fill_status.copy(),  # Send IBC ID -> class name mapping
             'timestamp': time.time()
         })

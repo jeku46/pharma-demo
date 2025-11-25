@@ -25,6 +25,7 @@ function App() {
   const [confidence, setConfidence] = useState(0.7)
   const [zones, setZones] = useState([])
   const [occupiedZoneIds, setOccupiedZoneIds] = useState([])
+  const [nonCompliantZoneIds, setNonCompliantZoneIds] = useState([])
   const [ibcStatus, setIbcStatus] = useState({})
   const socketRef = useRef(null)
   const liveCanvasRef = useRef(null)
@@ -178,21 +179,37 @@ function App() {
 
         zones.forEach(zone => {
           const isOccupied = occupiedZoneIds.includes(zone._id)
+          const isNonCompliant = nonCompliantZoneIds.includes(zone._id)
 
-          // Fill - green if occupied, blue if empty
-          ctx.fillStyle = isOccupied ? 'rgba(76, 175, 80, 0.3)' : 'rgba(66, 133, 244, 0.2)'
+          // Fill - red if non-compliant, green if occupied & compliant, blue if empty
+          let fillColor, strokeColor, labelBgColor
+          if (isNonCompliant) {
+            fillColor = 'rgba(244, 67, 54, 0.3)'  // Red
+            strokeColor = '#f44336'
+            labelBgColor = 'rgba(244, 67, 54, 0.9)'
+          } else if (isOccupied) {
+            fillColor = 'rgba(76, 175, 80, 0.3)'  // Green
+            strokeColor = '#4caf50'
+            labelBgColor = 'rgba(76, 175, 80, 0.9)'
+          } else {
+            fillColor = 'rgba(66, 133, 244, 0.2)'  // Blue
+            strokeColor = '#4285f4'
+            labelBgColor = 'rgba(0, 0, 0, 0.7)'
+          }
+
+          ctx.fillStyle = fillColor
           ctx.fillRect(zone.x, zone.y, zone.width, zone.height)
 
-          // Border - brighter green if occupied, blue if empty
-          ctx.strokeStyle = isOccupied ? '#4caf50' : '#4285f4'
-          ctx.lineWidth = isOccupied ? 3 : 2
+          // Border
+          ctx.strokeStyle = strokeColor
+          ctx.lineWidth = (isOccupied || isNonCompliant) ? 3 : 2
           ctx.strokeRect(zone.x, zone.y, zone.width, zone.height)
 
           // Label
           ctx.fillStyle = '#fff'
           ctx.font = 'bold 14px Arial'
           const textWidth = ctx.measureText(zone.name).width
-          ctx.fillStyle = isOccupied ? 'rgba(76, 175, 80, 0.9)' : 'rgba(0, 0, 0, 0.7)'
+          ctx.fillStyle = labelBgColor
           ctx.fillRect(zone.x, zone.y - 22, textWidth + 10, 22)
           ctx.fillStyle = '#fff'
           ctx.fillText(zone.name, zone.x + 5, zone.y - 6)
@@ -206,7 +223,7 @@ function App() {
       const interval = setInterval(drawZones, 100)
       return () => clearInterval(interval)
     }
-  }, [mode, cameraActive, zones, occupiedZoneIds])
+  }, [mode, cameraActive, zones, occupiedZoneIds, nonCompliantZoneIds])
 
   // WebSocket connection for live detection
   useEffect(() => {
@@ -226,8 +243,9 @@ function App() {
       })
 
       socketRef.current.on('zone_occupancy', (data) => {
-        console.log('Zone occupancy:', data.occupied_zone_ids)
+        console.log('Zone occupancy:', data.occupied_zone_ids, 'Non-compliant:', data.non_compliant_zone_ids)
         setOccupiedZoneIds(data.occupied_zone_ids || [])
+        setNonCompliantZoneIds(data.non_compliant_zone_ids || [])
         setIbcStatus(data.ibc_status || {})
       })
 
@@ -236,6 +254,7 @@ function App() {
           socketRef.current.disconnect()
         }
         setOccupiedZoneIds([])
+        setNonCompliantZoneIds([])
       }
     }
   }, [mode])

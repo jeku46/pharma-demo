@@ -5,6 +5,7 @@ const BACKEND_URL = 'http://localhost:5001'
 
 function Insights() {
   const [dwellTimes, setDwellTimes] = useState([])
+  const [occupancyIntervals, setOccupancyIntervals] = useState([])
   const [washSchedule, setWashSchedule] = useState([])
   const [complianceEvents, setComplianceEvents] = useState([])
   const [loading, setLoading] = useState(true)
@@ -20,17 +21,20 @@ function Insights() {
   const fetchAllData = async () => {
     try {
       setLoading(true)
-      const [dwellResponse, washResponse, eventsResponse] = await Promise.all([
+      const [dwellResponse, occupancyResponse, washResponse, eventsResponse] = await Promise.all([
         fetch(`${BACKEND_URL}/insights/dwell-time`),
+        fetch(`${BACKEND_URL}/occupancy?limit=100`),
         fetch(`${BACKEND_URL}/insights/wash-schedule`),
         fetch(`${BACKEND_URL}/insights/compliance-events`)
       ])
 
       const dwellData = await dwellResponse.json()
+      const occupancyData = await occupancyResponse.json()
       const washData = await washResponse.json()
       const eventsData = await eventsResponse.json()
 
       setDwellTimes(dwellData.dwell_times || [])
+      setOccupancyIntervals(occupancyData.intervals || [])
       setWashSchedule(washData.wash_schedule || [])
       setComplianceEvents(eventsData.events || [])
       setError(null)
@@ -68,6 +72,21 @@ function Insights() {
 
   const formatTimestamp = (timestamp) => {
     return new Date(timestamp * 1000).toLocaleString()
+  }
+
+  const formatDuration = (seconds) => {
+    if (!seconds) return 'N/A'
+    const hours = Math.floor(seconds / 3600)
+    const minutes = Math.floor((seconds % 3600) / 60)
+    const secs = Math.floor(seconds % 60)
+
+    if (hours > 0) {
+      return `${hours}h ${minutes}m ${secs}s`
+    } else if (minutes > 0) {
+      return `${minutes}m ${secs}s`
+    } else {
+      return `${secs}s`
+    }
   }
 
   if (loading && dwellTimes.length === 0) {
@@ -137,6 +156,55 @@ function Insights() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+      </section>
+
+      {/* Occupancy Intervals Section */}
+      <section className="insights-section">
+        <h2 className="insights-section-title">Occupancy Intervals History (Last 100)</h2>
+        {occupancyIntervals.length === 0 ? (
+          <p className="insights-empty">No occupancy data available yet.</p>
+        ) : (
+          <div className="occupancy-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>IBC ID</th>
+                  <th>Zone</th>
+                  <th>Entered</th>
+                  <th>Status on Entry</th>
+                  <th>Exited</th>
+                  <th>Status on Exit</th>
+                  <th>Duration</th>
+                </tr>
+              </thead>
+              <tbody>
+                {occupancyIntervals.map((interval) => (
+                  <tr key={interval._id} className={interval.exit_time ? '' : 'active-occupancy'}>
+                    <td className="ibc-id">{interval.ibc_id}</td>
+                    <td>{interval.zone_name}</td>
+                    <td>{formatTimestamp(interval.enter_time)}</td>
+                    <td>
+                      <span className="fill-status-badge">
+                        {interval.fill_status_on_entry ? interval.fill_status_on_entry.replace('IBC-', '') : 'Unknown'}
+                      </span>
+                    </td>
+                    <td>{interval.exit_time ? formatTimestamp(interval.exit_time) : <span className="status-active">Still in zone</span>}</td>
+                    <td>
+                      {interval.fill_status_on_exit ? (
+                        <span className="fill-status-badge">
+                          {interval.fill_status_on_exit.replace('IBC-', '')}
+                        </span>
+                      ) : (
+                        <span className="status-na">-</span>
+                      )}
+                    </td>
+                    <td>{interval.duration ? formatDuration(interval.duration) : <span className="status-na">-</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </section>
