@@ -3,6 +3,7 @@ import { io } from 'socket.io-client'
 import SpatialEditor from './SpatialEditor'
 import Insights from './Insights'
 import './App.css'
+import './Insights.css'
 
 const BACKEND_URL = 'http://localhost:5001'
 
@@ -23,16 +24,21 @@ function App() {
   const [occupiedZoneIds, setOccupiedZoneIds] = useState([])
   const [nonCompliantZoneIds, setNonCompliantZoneIds] = useState([])
   const [ibcStatus, setIbcStatus] = useState({})
+  const [ibcStatuses, setIbcStatuses] = useState([])
   const socketRef = useRef(null)
   const liveCanvasRef = useRef(null)
 
   
 
 
-  // Fetch zones when in live mode
+  // Fetch zones and IBC statuses when in live mode
   useEffect(() => {
     if (mode === 'live') {
       fetchZones()
+      fetchIbcStatuses()
+      // Refresh IBC statuses every 30 seconds
+      const interval = setInterval(fetchIbcStatuses, 30000)
+      return () => clearInterval(interval)
     }
   }, [mode])
 
@@ -45,6 +51,20 @@ function App() {
     } catch (err) {
       console.error('Failed to fetch zones:', err)
     }
+  }
+
+  const fetchIbcStatuses = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/ibcs/status`)
+      const data = await response.json()
+      setIbcStatuses(data.ibcs || [])
+    } catch (err) {
+      console.error('Failed to fetch IBC statuses:', err)
+    }
+  }
+
+  const formatTimestamp = (timestamp) => {
+    return new Date(timestamp * 1000).toLocaleString()
   }
 
   // Draw zones on canvas
@@ -273,6 +293,51 @@ function App() {
               )}
             </div>
 
+            {/* IBC Status Table */}
+            <section className="insights-section" style={{ marginTop: '20px' }}>
+              <h2 className="insights-section-title">IBC Status</h2>
+              {ibcStatuses.length === 0 ? (
+                <p className="insights-empty">No IBCs tracked yet.</p>
+              ) : (
+                <div className="ibc-status-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>IBC ID</th>
+                        <th>Needs Wash</th>
+                        <th>Last Cleaned</th>
+                        <th>Fill Status</th>
+                        <th>Filled With</th>
+                        <th>Current Zone</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ibcStatuses.map((ibc) => (
+                        <tr key={ibc.ibc_id} className={ibc.needs_wash ? 'needs-wash' : ''}>
+                          <td className="ibc-id">{ibc.ibc_id}</td>
+                          <td>
+                            {ibc.needs_wash ? (
+                              <span className="needs-wash-badge">Yes</span>
+                            ) : (
+                              <span className="no-wash-badge">No</span>
+                            )}
+                          </td>
+                          <td>{ibc.last_cleaned ? formatTimestamp(ibc.last_cleaned) : 'Never'}</td>
+                          <td>
+                            <span className="fill-status-badge">
+                              {ibc.fill_status ? ibc.fill_status.replace('IBC-', '') : 'Unknown'}
+                            </span>
+                          </td>
+                          <td>{ibc.filled_with || '-'}</td>
+                          <td>{ibc.current_zones.length > 0 ? ibc.current_zones.join(', ') : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+
             {cameraActive && Object.keys(ibcStatus).length > 0 && (
               <div className="ibc-status-list" style={{
                 marginTop: '20px',
@@ -299,12 +364,13 @@ function App() {
                       padding: '8px 12px',
                       background: 'rgba(255, 255, 255, 0.03)',
                       borderRadius: '4px',
-                      border: '1px solid rgba(255, 255, 255, 0.1)'
+                      border: '1px solid rgba(255, 255, 255, 0.1)',
+                      minWidth: '300px'
                     }}>
                       <span style={{
                         fontWeight: '600',
                         color: '#4285f4'
-                      }}>IBC-{ibcId}</span>
+                      }}>{ibcId}</span>
                       <span style={{
                         color: className.toLowerCase().endsWith('empty') ? '#34a853' : '#fbbc04'
                       }}>{className}</span>

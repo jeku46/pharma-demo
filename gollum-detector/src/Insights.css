@@ -188,6 +188,61 @@
   border: 1px solid rgba(66, 133, 244, 0.4);
 }
 
+/* IBC Status Section */
+.ibc-status-table {
+  overflow-x: auto;
+}
+
+.ibc-status-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ibc-status-table th {
+  background: rgba(255, 255, 255, 0.05);
+  padding: 12px 16px;
+  text-align: left;
+  font-weight: 600;
+  color: #e0e0e0;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.2);
+}
+
+.ibc-status-table td {
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  color: #ccc;
+}
+
+.ibc-status-table tr:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.ibc-status-table tr.needs-wash {
+  background: rgba(244, 67, 54, 0.1);
+}
+
+.needs-wash-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(244, 67, 54, 0.2);
+  color: #ff6b6b;
+  border: 1px solid rgba(244, 67, 54, 0.4);
+}
+
+.no-wash-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(52, 168, 83, 0.2);
+  color: #81c784;
+  border: 1px solid rgba(52, 168, 83, 0.4);
+}
+
 /* Occupancy Intervals Section */
 .occupancy-table {
   overflow-x: auto;

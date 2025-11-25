@@ -4,6 +4,7 @@ import './Insights.css'
 const BACKEND_URL = 'http://localhost:5001'
 
 function Insights() {
+  const [ibcStatuses, setIbcStatuses] = useState([])
   const [dwellTimes, setDwellTimes] = useState([])
   const [occupancyIntervals, setOccupancyIntervals] = useState([])
   const [washSchedule, setWashSchedule] = useState([])
@@ -21,18 +22,21 @@ function Insights() {
   const fetchAllData = async () => {
     try {
       setLoading(true)
-      const [dwellResponse, occupancyResponse, washResponse, eventsResponse] = await Promise.all([
+      const [ibcStatusResponse, dwellResponse, occupancyResponse, washResponse, eventsResponse] = await Promise.all([
+        fetch(`${BACKEND_URL}/ibcs/status`),
         fetch(`${BACKEND_URL}/insights/dwell-time`),
         fetch(`${BACKEND_URL}/occupancy?limit=100`),
         fetch(`${BACKEND_URL}/insights/wash-schedule`),
         fetch(`${BACKEND_URL}/insights/compliance-events`)
       ])
 
+      const ibcStatusData = await ibcStatusResponse.json()
       const dwellData = await dwellResponse.json()
       const occupancyData = await occupancyResponse.json()
       const washData = await washResponse.json()
       const eventsData = await eventsResponse.json()
 
+      setIbcStatuses(ibcStatusData.ibcs || [])
       setDwellTimes(dwellData.dwell_times || [])
       setOccupancyIntervals(occupancyData.intervals || [])
       setWashSchedule(washData.wash_schedule || [])
@@ -114,6 +118,51 @@ function Insights() {
           Clear All Data
         </button>
       </div>
+
+      {/* IBC Status Section */}
+      <section className="insights-section">
+        <h2 className="insights-section-title">IBC Status</h2>
+        {ibcStatuses.length === 0 ? (
+          <p className="insights-empty">No IBCs tracked yet.</p>
+        ) : (
+          <div className="ibc-status-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>IBC ID</th>
+                  <th>Needs Wash</th>
+                  <th>Last Cleaned</th>
+                  <th>Fill Status</th>
+                  <th>Filled With</th>
+                  <th>Current Zone</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ibcStatuses.map((ibc) => (
+                  <tr key={ibc.ibc_id} className={ibc.needs_wash ? 'needs-wash' : ''}>
+                    <td className="ibc-id">{ibc.ibc_id}</td>
+                    <td>
+                      {ibc.needs_wash ? (
+                        <span className="needs-wash-badge">Yes</span>
+                      ) : (
+                        <span className="no-wash-badge">No</span>
+                      )}
+                    </td>
+                    <td>{ibc.last_cleaned ? formatTimestamp(ibc.last_cleaned) : 'Never'}</td>
+                    <td>
+                      <span className="fill-status-badge">
+                        {ibc.fill_status ? ibc.fill_status.replace('IBC-', '') : 'Unknown'}
+                      </span>
+                    </td>
+                    <td>{ibc.filled_with || '-'}</td>
+                    <td>{ibc.current_zones.length > 0 ? ibc.current_zones.join(', ') : '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       {/* Dwell Time Section */}
       <section className="insights-section">
@@ -229,7 +278,7 @@ function Insights() {
               <tbody>
                 {washSchedule.map((ibc) => (
                   <tr key={ibc.ibc_id} className={`urgency-${ibc.urgency}`}>
-                    <td className="ibc-id">IBC-{ibc.ibc_id}</td>
+                    <td className="ibc-id">{ibc.ibc_id}</td>
                     <td>{ibc.days_since_wash !== null ? `${ibc.days_since_wash} days` : 'Never'}</td>
                     <td>{ibc.last_cleaned ? formatTimestamp(ibc.last_cleaned) : 'Never washed'}</td>
                     <td>
@@ -265,7 +314,7 @@ function Insights() {
                 </div>
                 <div className="event-details">
                   <div className="event-detail-row">
-                    <strong>IBC:</strong> IBC-{event.ibc_id}
+                    <strong>IBC:</strong> {event.ibc_id}
                   </div>
                   <div className="event-detail-row">
                     <strong>Zone:</strong> {event.zone_name}

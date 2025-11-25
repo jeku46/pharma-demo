@@ -201,6 +201,35 @@ def record_zone_entry(ibc_id, zone, enter_time):
                     severity='high'
                 )
 
+        # Check for IBC filled with API entering Station 2
+        if 'station 2' in zone['name'].lower():
+            fill_status = ibc_fill_status.get(ibc_id, '')
+            if fill_status and 'api' in fill_status.lower() and 'empty' not in fill_status.lower():
+                reason = f"IBC filled with API entered {zone['name']}"
+                event = {
+                    'timestamp': enter_time,
+                    'ibc_id': ibc_id,
+                    'zone_id': zone['_id'],
+                    'zone_name': zone['name'],
+                    'event_type': 'api_filled_station2_entry',
+                    'severity': 'high',
+                    'reason': reason,
+                    'fill_status': fill_status
+                }
+                if compliance_events_collection is not None:
+                    compliance_events_collection.insert_one(event)
+                print(f"⚠️ COMPLIANCE VIOLATION: {reason}")
+
+                # Send push notification
+                notifier = get_notifier()
+                notifier.notify_compliance_event(
+                    event_type='api_filled_station2_entry',
+                    ibc_id=ibc_id,
+                    zone_name=zone['name'],
+                    reason=reason,
+                    severity='high'
+                )
+
         # Check for non-empty IBC entering Washroom
         if zone['name'].lower() == 'washroom' and compliance_events_collection is not None:
             fill_status = ibc_fill_status.get(ibc_id, '')
@@ -292,13 +321,14 @@ def record_zone_exit(ibc_id, zone_id, exit_time):
             )
             print(f"IBC {ibc_id} ({fill_status_on_exit}) EXITED zone '{doc['zone_name']}' after {duration:.1f}s")
 
-            # If exiting Washroom, update last_cleaned timestamp
+            # If exiting Washroom AND empty, update last_cleaned timestamp and clear needs_wash
             if doc['zone_name'].lower() == 'washroom' and ibcs_collection is not None:
-                ibcs_collection.update_one(
-                    {'ibc_id': ibc_id},
-                    {'$set': {'last_cleaned': exit_time}}
-                )
-                print(f"IBC {ibc_id} CLEANED (exited Washroom)")
+                if fill_status_on_exit and 'empty' in fill_status_on_exit.lower():
+                    ibcs_collection.update_one(
+                        {'ibc_id': ibc_id},
+                        {'$set': {'last_cleaned': exit_time, 'needs_wash': None}}
+                    )
+                    print(f"IBC {ibc_id} CLEANED (exited Washroom empty)")
 
         del active_occupancies[key]
 
@@ -391,17 +421,27 @@ def turn_off_all_leds():
 # Simple centroid tracker for maintaining IBC IDs across frames
 class CentroidTracker:
     """Simple centroid-based object tracker"""
-    def __init__(self, max_disappeared=30):
+    def __init__(self, max_disappeared=60, max_objects=2):
         self.next_id = 1
         self.objects = {}  # {id: centroid}
         self.disappeared = {}  # {id: frame_count}
+        self.last_seen = {}  # {id: timestamp} - track when each object was last seen
         self.max_disappeared = max_disappeared
+        self.max_objects = max_objects
 
     def register(self, centroid):
-        """Register a new object"""
+        """Register a new object, removing oldest if at max capacity"""
+        # If at max capacity, remove the oldest object
+        if len(self.objects) >= self.max_objects:
+            # Find the object with the oldest last_seen timestamp
+            oldest_id = min(self.last_seen.keys(), key=lambda k: self.last_seen[k])
+            print(f"Max objects reached, removing oldest object {oldest_id}")
+            self.deregister(oldest_id)
+
         object_id = self.next_id
         self.objects[object_id] = centroid
         self.disappeared[object_id] = 0
+        self.last_seen[object_id] = time.time()
         self.next_id += 1
         return object_id
 
@@ -409,6 +449,8 @@ class CentroidTracker:
         """Deregister an object"""
         del self.objects[object_id]
         del self.disappeared[object_id]
+        if object_id in self.last_seen:
+            del self.last_seen[object_id]
 
     def update(self, detections):
         """
@@ -424,9 +466,9 @@ class CentroidTracker:
                     self.deregister(object_id)
             return self.objects
 
-        # If no existing objects, register all detections
+        # If no existing objects, register all detections (up to max)
         if len(self.objects) == 0:
-            for centroid in detections:
+            for centroid in detections[:self.max_objects]:
                 self.register(centroid)
             return self.objects
 
@@ -459,24 +501,26 @@ class CentroidTracker:
             object_id = object_ids[row]
             self.objects[object_id] = detections[col]
             self.disappeared[object_id] = 0
+            self.last_seen[object_id] = time.time()
 
-        # Register new objects
+        # Deregister disappeared objects first (before registering new ones)
+        for row in range(len(object_centroids)):
+            if row not in used_rows:
+                object_id = object_ids[row]
+                if object_id in self.disappeared:  # Check if still exists
+                    self.disappeared[object_id] += 1
+                    if self.disappeared[object_id] > self.max_disappeared:
+                        self.deregister(object_id)
+
+        # Register new objects (will auto-remove oldest if at capacity)
         for col in range(len(detections)):
             if col not in used_cols:
                 self.register(detections[col])
 
-        # Deregister disappeared objects
-        for row in range(len(object_centroids)):
-            if row not in used_rows:
-                object_id = object_ids[row]
-                self.disappeared[object_id] += 1
-                if self.disappeared[object_id] > self.max_disappeared:
-                    self.deregister(object_id)
-
         return self.objects
 
 # Initialize tracker and IBC mapper
-ibc_tracker = CentroidTracker(max_disappeared=30)
+ibc_tracker = CentroidTracker(max_disappeared=60, max_objects=2)
 ibc_mapper = IBCMapper(num_ibcs=2)  # We have 2 IBCs: IBC-1 and IBC-2
 
 def detect_with_roboflow(frame, confidence_threshold):
@@ -606,104 +650,78 @@ def detection_loop():
         if current_time - zone_refresh_time > 5:
             zones = get_cached_zones()
             zone_refresh_time = current_time
+        # ===== ROBOFLOW API DETECTION PATH =====
+        # Resize frame to 640x480 to match zone coordinates
+        resized_frame = cv2.resize(frame, (640, 480))
 
-        if USE_ROBOFLOW_API:
-            # ===== ROBOFLOW API DETECTION PATH =====
-            # Resize frame to 640x480 to match zone coordinates
-            resized_frame = cv2.resize(frame, (640, 480))
+        # Get detections from Roboflow
+        detections = detect_with_roboflow(resized_frame, confidence_threshold)
 
-            # Get detections from Roboflow
-            detections = detect_with_roboflow(resized_frame, confidence_threshold)
+        # Keep only the top 2 detections by confidence
+        if len(detections) > 2:
+            detections = sorted(detections, key=lambda d: d['confidence'], reverse=True)[:2]
 
-            # Keep only the top 2 detections by confidence
-            if len(detections) > 2:
-                detections = sorted(detections, key=lambda d: d['confidence'], reverse=True)[:2]
+        # Update tracker with centroids
+        centroids = [d['centroid'] for d in detections]
+        tracked_objects = ibc_tracker.update(centroids)
 
-            # Update tracker with centroids
-            centroids = [d['centroid'] for d in detections]
-            tracked_objects = ibc_tracker.update(centroids)
+        # Map tracker IDs to IBC identities (IBC-1, IBC-2)
+        mapped_ibcs = ibc_mapper.map_detections(tracked_objects)
 
-            # Map tracker IDs to IBC identities (IBC-1, IBC-2)
-            mapped_ibcs = ibc_mapper.map_detections(tracked_objects)
+        # Debug logging (first frame only to avoid spam)
+        if current_time - zone_refresh_time < 0.1:
+            print(f"DEBUG: {len(zones)} zones loaded, {len(detections)} detections, {len(tracked_objects)} tracked objects, {len(mapped_ibcs)} mapped IBCs")
 
-            # Debug logging (first frame only to avoid spam)
-            if current_time - zone_refresh_time < 0.1:
-                print(f"DEBUG: {len(zones)} zones loaded, {len(detections)} detections, {len(tracked_objects)} tracked objects, {len(mapped_ibcs)} mapped IBCs")
+        # Draw detections with mapped IBC IDs on resized frame
+        annotated_frame, matched_detections = draw_detections(resized_frame, detections, mapped_ibcs)
 
-            # Draw detections with mapped IBC IDs on resized frame
-            annotated_frame, matched_detections = draw_detections(resized_frame, detections, mapped_ibcs)
+        # Process IBC tracking and zone occupancy
+        # Create fake "boxes" structure for compatibility with existing zone tracking code
+        class FakeBox:
+            def __init__(self, ibc_id, bbox):
+                self.id = [ibc_id]
+                x1, y1, x2, y2 = bbox
+                self.xyxy = [np.array([x1, y1, x2, y2])]
 
-            # Process IBC tracking and zone occupancy
-            # Create fake "boxes" structure for compatibility with existing zone tracking code
-            class FakeBox:
-                def __init__(self, ibc_id, bbox):
-                    self.id = [ibc_id]
-                    x1, y1, x2, y2 = bbox
-                    self.xyxy = [np.array([x1, y1, x2, y2])]
+        # Build fake boxes from MAPPED IBCs (IBC-1, IBC-2) and their matched detections
+        fake_boxes = []
+        for ibc_identity, centroid in mapped_ibcs.items():
+            # Find the detection closest to this IBC
+            if len(detections) > 0:
+                # Find detection with matching centroid
+                min_dist = float('inf')
+                best_detection = None
+                for det in detections:
+                    dx = det['centroid'][0] - centroid[0]
+                    dy = det['centroid'][1] - centroid[1]
+                    dist = (dx*dx + dy*dy) ** 0.5
+                    if dist < min_dist and dist < 100:  # Within threshold
+                        min_dist = dist
+                        best_detection = det
 
-            # Build fake boxes from MAPPED IBCs (IBC-1, IBC-2) and their matched detections
-            fake_boxes = []
-            for ibc_identity, centroid in mapped_ibcs.items():
-                # Find the detection closest to this IBC
-                if len(detections) > 0:
-                    # Find detection with matching centroid
-                    min_dist = float('inf')
-                    best_detection = None
-                    for det in detections:
-                        dx = det['centroid'][0] - centroid[0]
-                        dy = det['centroid'][1] - centroid[1]
-                        dist = (dx*dx + dy*dy) ** 0.5
-                        if dist < min_dist and dist < 100:  # Within threshold
-                            min_dist = dist
-                            best_detection = det
+                if best_detection:
+                    fake_boxes.append(FakeBox(ibc_identity, best_detection['bbox']))
+                    # Check for fill status change (API -> Empty triggers needs_wash)
+                    check_fill_status_change(ibc_identity, best_detection['class'], current_time)
+                    # Store fill status for this IBC (using IBC-1, IBC-2 as keys)
+                    ibc_fill_status[ibc_identity] = best_detection['class']
 
-                    if best_detection:
-                        fake_boxes.append(FakeBox(ibc_identity, best_detection['bbox']))
-                        # Check for fill status change (API -> Empty triggers needs_wash)
-                        check_fill_status_change(ibc_identity, best_detection['class'], current_time)
-                        # Store fill status for this IBC (using IBC-1, IBC-2 as keys)
-                        ibc_fill_status[ibc_identity] = best_detection['class']
+        if current_time - zone_refresh_time < 0.1:
+            print(f"DEBUG: Created {len(fake_boxes)} fake boxes")
 
-            if current_time - zone_refresh_time < 0.1:
-                print(f"DEBUG: Created {len(fake_boxes)} fake boxes")
+        occupied_zone_ids = set()
+        if len(fake_boxes) > 0 and len(zones) > 0:
+            occupied_zone_ids = process_ibc_tracking(fake_boxes, zones, current_time)
 
-            occupied_zone_ids = set()
-            if len(fake_boxes) > 0 and len(zones) > 0:
-                occupied_zone_ids = process_ibc_tracking(fake_boxes, zones, current_time)
+        if current_time - zone_refresh_time < 0.1:
+            print(f"DEBUG: {len(occupied_zone_ids)} zones occupied")
 
-            if current_time - zone_refresh_time < 0.1:
-                print(f"DEBUG: {len(occupied_zone_ids)} zones occupied")
+        # Check if target object was detected
+        target_found = len(detections) > 0
+        detected_classes = [d['class'] for d in detections]
+        tracked_ids = list(mapped_ibcs.keys())  # Use mapped IBC identities (IBC-1, IBC-2)
 
-            # Check if target object was detected
-            target_found = len(detections) > 0
-            detected_classes = [d['class'] for d in detections]
-            tracked_ids = list(mapped_ibcs.keys())  # Use mapped IBC identities (IBC-1, IBC-2)
-
-        else:
-            # ===== LOCAL YOLO MODEL PATH =====
-            # Run detection with TRACKING (persist=True keeps IDs across frames)
-            results = model.track(frame, conf=confidence_threshold, persist=True, verbose=False)
-
-            # Get annotated frame
-            annotated_frame = results[0].plot()
-
-            # Process IBC tracking and zone occupancy
-            occupied_zone_ids = set()
-            if results[0].boxes is not None and len(zones) > 0:
-                occupied_zone_ids = process_ibc_tracking(results[0].boxes, zones, current_time, model)
-
-            # Check if target object was detected (IBC for pharma, gollum for original)
-            target_found = False
-            detected_classes = []
-            tracked_ids = []
-            for result in results:
-                for box in result.boxes:
-                    class_id = int(box.cls[0])
-                    class_name = model.names[class_id]
-                    detected_classes.append(class_name)
-                    if box.id is not None:
-                        tracked_ids.append(int(box.id[0]))
-                    target_found = True
+        
 
         # Update shared frame (common for both paths)
         with frame_lock:
@@ -743,28 +761,6 @@ def detection_loop():
             'ibc_status': ibc_fill_status.copy(),  # Send IBC ID -> class name mapping
             'timestamp': time.time()
         })
-
-        # Only control LEDs and emit detection event if state changed
-        if target_found != last_gollum_state:
-            last_gollum_state = target_found
-
-            # Control LEDs
-            if target_found:
-                control_led('red', 'on')
-                control_led('green', 'off')
-            else:
-                control_led('red', 'off')
-                control_led('green', 'on')
-
-            # Emit WebSocket event (keep gollum_found for backward compatibility)
-            socketio.emit('detection', {
-                'gollum_found': target_found,
-                'detected_classes': detected_classes,
-                'timestamp': time.time()
-            })
-
-            classes_str = ', '.join(detected_classes) if detected_classes else 'none'
-            print(f"Detection: {classes_str if target_found else 'nothing detected'}")
 
         # Small delay to prevent CPU overload
         time.sleep(0.033)  # ~30 FPS
@@ -1199,6 +1195,56 @@ def get_ibcs():
         return jsonify({'ibcs': ibcs})
     except Exception as e:
         print(f"Error getting IBCs: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/ibcs/status', methods=['GET'])
+def get_ibcs_status():
+    """Get all IBCs with current status including zone, fill status, needs wash"""
+    try:
+        if not use_mongodb or ibcs_collection is None:
+            return jsonify({'ibcs': [], 'message': 'MongoDB not available'})
+
+        # Get all IBCs from database
+        ibcs = list(ibcs_collection.find().sort('ibc_id', 1))
+
+        # Get zones for lookup
+        zones = get_cached_zones()
+        zone_lookup = {z['_id']: z['name'] for z in zones}
+
+        # Build status for each IBC
+        ibc_statuses = []
+        for ibc in ibcs:
+            ibc_id = ibc['ibc_id']
+
+            # Get current zone(s) from in-memory state
+            current_zone_ids = ibc_zone_state.get(ibc_id, set())
+            current_zones = [zone_lookup.get(zid, 'Unknown') for zid in current_zone_ids]
+
+            # Get current fill status from in-memory state
+            fill_status = ibc_fill_status.get(ibc_id, 'Unknown')
+
+            # Determine if filled with API (not empty)
+            filled_with = None
+            if fill_status and 'empty' not in fill_status.lower():
+                if 'api' in fill_status.lower():
+                    filled_with = 'API'
+                else:
+                    filled_with = fill_status
+
+            ibc_statuses.append({
+                'ibc_id': ibc_id,
+                'needs_wash': ibc.get('needs_wash') is not None,
+                'needs_wash_since': ibc.get('needs_wash'),
+                'last_cleaned': ibc.get('last_cleaned'),
+                'fill_status': fill_status,
+                'filled_with': filled_with,
+                'current_zones': current_zones,
+                'last_seen': ibc.get('last_seen')
+            })
+
+        return jsonify({'ibcs': ibc_statuses})
+    except Exception as e:
+        print(f"Error getting IBC status: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/ibcs/<ibc_id>', methods=['GET'])  # Accept string IBC IDs (IBC-1, IBC-2)
