@@ -2,6 +2,9 @@
 Gollum Detection Server using locally trained YOLO model
 Supports both local webcam and IP camera (phone) sources
 """
+from dotenv import load_dotenv
+load_dotenv('../.env')  # Load environment variables from .env file
+
 from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
@@ -9,6 +12,7 @@ from ultralytics import YOLO
 from pymongo import MongoClient
 from bson import ObjectId
 from ibc_mapper import IBCMapper
+from notifications import get_notifier
 import cv2
 import threading
 import requests
@@ -36,7 +40,7 @@ confidence_threshold = 0.5  # Default confidence threshold
 
 # Roboflow API configuration
 USE_ROBOFLOW_API = True  # Set to True to use Roboflow hosted inference
-ROBOFLOW_API_KEY = "g3kyzU8K82YQwalVS2Ks"
+ROBOFLOW_API_KEY = os.environ.get('ROBOFLOW_API_KEY', '')
 ROBOFLOW_WORKSPACE = "die-counter"
 ROBOFLOW_PROJECT = "pharma-demo-v2-5mkw0"
 ROBOFLOW_VERSION = 7
@@ -157,11 +161,22 @@ def record_zone_entry(ibc_id, zone, enter_time):
                     compliance_events_collection.insert_one(event)
                     print(f"⚠️ COMPLIANCE VIOLATION: {reason} - entered {zone['name']}")
 
+                    # Send push notification
+                    notifier = get_notifier()
+                    notifier.notify_compliance_event(
+                        event_type='unwashed_entry',
+                        ibc_id=ibc_id,
+                        zone_name=zone['name'],
+                        reason=reason,
+                        severity='high'
+                    )
+
         # Check for non-empty IBC entering Washroom
         if zone['name'].lower() == 'washroom' and compliance_events_collection is not None:
             fill_status = ibc_fill_status.get(ibc_id, '')
             if fill_status and not fill_status.lower().endswith('empty'):
                 # Non-empty IBC entered washroom
+                reason = f"Non-empty IBC ({fill_status}) entered Washroom"
                 event = {
                     'timestamp': enter_time,
                     'ibc_id': ibc_id,  # Store as string (IBC-1, IBC-2)
@@ -169,11 +184,21 @@ def record_zone_entry(ibc_id, zone, enter_time):
                     'zone_name': zone['name'],
                     'event_type': 'non_empty_washroom_entry',
                     'severity': 'high',
-                    'reason': f"Non-empty IBC ({fill_status}) entered Washroom",
+                    'reason': reason,
                     'fill_status': fill_status
                 }
                 compliance_events_collection.insert_one(event)
-                print(f"⚠️ COMPLIANCE VIOLATION: Non-empty IBC ({fill_status}) entered Washroom")
+                print(f"⚠️ COMPLIANCE VIOLATION: {reason}")
+
+                # Send push notification
+                notifier = get_notifier()
+                notifier.notify_compliance_event(
+                    event_type='non_empty_washroom_entry',
+                    ibc_id=ibc_id,
+                    zone_name=zone['name'],
+                    reason=reason,
+                    severity='high'
+                )
 
 def update_ibc_tracking(ibc_id, current_time):
     """Update IBC first_seen and last_seen timestamps"""

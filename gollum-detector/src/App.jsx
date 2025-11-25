@@ -101,7 +101,7 @@ function App() {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          api_key: 'g3kyzU8K82YQwalVS2Ks',
+          api_key: import.meta.env.VITE_ROBOFLOW_API_KEY,
           inputs: {
             "image": {"type": "base64", "value": previewUrl.split(',')[1]},
             "confidence": "0.95"
